@@ -3,7 +3,6 @@
 import numpy as np
 import time
 import constants
-from constants import DEFAULT_N, DEFAULT_DX, DEFAULT_DT, R0, DEFAULT_DELAY, DEFAULT_FM, DEFAULT_TAU
 from kspace_operators import KSpaceOperators
 from pml import PML
 from atmospheres import AtmosphereGenerator
@@ -11,14 +10,14 @@ from incident_wave import IncidentWave
 from ntff import NTFFTransform
 
 class KSpaceAcousticScattering:
-    def __init__(self, N=DEFAULT_N, dx=DEFAULT_DX, dt=DEFAULT_DT):
+    def __init__(self, N=constants.DEFAULT_N, dx=constants.DEFAULT_DX, dt=constants.DEFAULT_DT):
         self.N = N
         self.dx = dx
         self.dt = dt
 
         # Domain parameters
         self.domain_size = self.N * self.dx
-        self.x = np.linspace(-self.domain_size/2, self.domain_size/2, self.N)
+        self.x = np.linspace(-self.domain_size/2, self.domain_size/2, self.N) # returns [-128,-127,...,127,128]
         self.y = np.linspace(-self.domain_size/2, self.domain_size/2, self.N)
         self.z = np.linspace(-self.domain_size/2, self.domain_size/2, self.N)
         
@@ -34,27 +33,27 @@ class KSpaceAcousticScattering:
         self.ntff = NTFFTransform(self.x, self.y, self.z, self.dx, constants.C0, constants.RHO0, constants.PML_DEPTH)
         
         
-    def create_bragg_atmosphere(self, fm, DT=1.0, r0=R0):
+    def create_bragg_atmosphere(self, fm, DT=1.0, r0=constants.R0):
         return self.atmosphere.create_bragg_atmosphere(fm, DT, r0)
     
-    def create_kolmogorov_atmosphere(self, CT2, r0=R0, seed=None):
+    def create_kolmogorov_atmosphere(self, CT2, r0=constants.R0, seed=None):
         return self.atmosphere.create_kolmogorov_atmosphere(CT2, r0, seed)
 
-    def _simulate_scattering(self, T, n_steps=7000, fm=DEFAULT_FM, tau=DEFAULT_TAU, delay=DEFAULT_DELAY):
+    def _simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
         self.fm = fm
         self.tau = tau
         self.delay = delay
 
         # Far-field directions
-        angles_deg = np.linspace(-180, 180, 120)
+        angles_deg = np.linspace(-180, 180, 360, endpoint=False)
         directions = np.zeros((len(angles_deg), 3))
-        for i, angle_deg in enumerate(angles_deg):
-            angle_rad = np.deg2rad(angle_deg)
-            directions[i] = [np.sin(angle_rad), 0.0, np.cos(angle_rad)]
+        for i, angle_deg in enumerate(angles_deg): # i is an array with three components declared in line before, NTFF needs direction split into components to project velocity onto direction d
+            angle_rad = np.deg2rad(angle_deg) # np expects rad not deg.
+            directions[i] = [np.sin(angle_rad), 0.0, np.cos(angle_rad)] # "far-field directions were modeled spaced at equal angles over the y = 0 plane."
         
-        self.ntff.precompute_coefficients(directions, self.dt)
-        self.ntff.initialize_buffer(n_steps)
-        self.pml.set_dt(self.dt)
+        self.ntff.precompute_coefficients(directions, self.dt) # precomputes all the geometric factors and time weights in EQN 15.
+        self.ntff.initialize_buffer(n_steps) # Creates np.zeros array of dir*nsteps
+        self.pml.set_dt(self.dt) # Tell the PML object what the time step is.
 
         # Initialize scattered fields (split into directional components for PML)
         # Current time step fields
@@ -76,13 +75,14 @@ class KSpaceAcousticScattering:
         pz_s_prev = np.zeros((self.N, self.N, self.N))
         
         # Medium properties
-        rho = constants.RHO0 * constants.T0 / T
+        rho = constants.RHO0 * constants.T0 / T # ideal gas equation
 
-        print(f"Simulating {n_steps} time steps with full 3D NTFF...")
+        print(f"Simulating {n_steps} time steps")
         start_time = time.time()
 
         for step in range(n_steps):
-            t = step * self.dt
+            # Every update (incident field, source term, NTFF) depends on the physical time, not just the index.
+            t = step * self.dt # its like frame number * number of frames; it's the timestamp in the simulation
             
             # Incident field and source term (EQN 9)
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
@@ -124,11 +124,11 @@ class KSpaceAcousticScattering:
             px_s_prev, py_s_prev, pz_s_prev = px_s, py_s, pz_s
             px_s, py_s, pz_s = px_s_new, py_s_new, pz_s_new
             
-            # Accumulate far-field (EQN 17)
+            # Accumulate far-field data for later (EQN 17)
             p_s_total = px_s + py_s + pz_s
             self.ntff.accumulate(p_s_total, ux_s, uy_s, uz_s, step)
 
-            if (step + 1) % 100 == 0:
+            if (step + 1) % 100 == 0: # every 100 steps, print progress
                 print(f"  Step {step + 1}/{n_steps}")
         
         elapsed = time.time() - start_time
@@ -136,12 +136,12 @@ class KSpaceAcousticScattering:
         
         # Compute final far-field
         print("Computing far-field from NTFF buffer...")
-        p_ff = self.ntff.compute_far_field()
-        far_field = np.sum(p_ff**2, axis=1)
+        p_ff = self.ntff.compute_far_field() # takes all near field data and computes far field using EQN 17.
+        far_field = np.sum(p_ff**2, axis=1) #integrates energy of far-field over time.
 
         return far_field, angles_deg
 
-    def simulate_scattering(self, T, n_steps=7000, fm=DEFAULT_FM, tau=DEFAULT_TAU, delay=DEFAULT_DELAY):
+    def simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
         return self._simulate_scattering(T, n_steps=n_steps, fm=fm, tau=tau, delay=delay)
     
     def calculate_scattering_cross_section(self, far_field):

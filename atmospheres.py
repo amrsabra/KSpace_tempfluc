@@ -4,7 +4,6 @@
 import numpy as np
 from scipy.special import gamma as gamma_func
 import constants
-from constants import R0
 
 class AtmosphereGenerator:
     def __init__(self, X, Y, Z, R, dx):
@@ -26,7 +25,7 @@ class AtmosphereGenerator:
         # Flat region (full transmission)
         window[self.R < r1] = 1.0
         
-        # Tapered region (cosine taper)
+        # Tapered region (cosine taper) EQN 18
         taper_mask = (self.R >= r1) & (self.R <= r0)
         window[taper_mask] = 0.5 + 0.5 * np.cos(
             np.pi * (self.R[taper_mask] - r1) / (r0 - r1)
@@ -34,11 +33,10 @@ class AtmosphereGenerator:
         
         return window
     
-    def create_bragg_atmosphere(self, fm, DT=1.0, r0=R0):
+    def create_bragg_atmosphere(self, fm, DT=1.0, r0=constants.R0):
         window = self.create_tukey_window(r0)
         
-        # Periodic fluctuations with spacing = lambda/2
-        wavelength = constants.C0 / fm
+        # EQN 19
         T = constants.T0 + window * np.cos(4 * np.pi * fm * self.Z / constants.C0) * DT
         
         # Calculate scattering volume (after eqn 18 "by performing a volume integral of w(r)")
@@ -46,7 +44,7 @@ class AtmosphereGenerator:
         
         return T, window, V_scat
     
-    def create_kolmogorov_atmosphere(self, CT2, r0=R0, seed=None):
+    def create_kolmogorov_atmosphere(self, CT2, r0=constants.R0, seed=None):
         if seed is not None:
             np.random.seed(seed)
         
@@ -66,12 +64,12 @@ class AtmosphereGenerator:
         k_outer = 2 * np.pi / L_outer
         k_inner = 2 * np.pi / L_inner
         
-        # exact Eq 22
+        # exact Eqn 22
         U_k = constants.KOLMOGOROV_CONSTANT * CT2 * k_mag**(-11.0 / 3.0)
 
         # enforce inertial range
         mask = (k_mag >= k_outer) & (k_mag <= k_inner)
-        U_k[~mask] = 0.0
+        U_k[~mask] = 0.0 #outside range, 0.
         U_k[0, 0, 0] = 0.0
 
         # Generate random phases

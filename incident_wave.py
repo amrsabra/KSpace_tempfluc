@@ -3,7 +3,6 @@
 
 import numpy as np
 import constants
-from constants import DEFAULT_FM, DEFAULT_TAU, DEFAULT_DELAY
 
 class IncidentWave:
     def __init__(self, X, Y, Z):
@@ -11,11 +10,11 @@ class IncidentWave:
         self.Y = Y
         self.Z = Z
         
-    def plane_wave(self, t, fm=DEFAULT_FM, sigma=DEFAULT_TAU, mu=DEFAULT_DELAY):
+    def plane_wave(self, t, fm=constants.DEFAULT_FM, sigma=constants.DEFAULT_TAU, mu=constants.DEFAULT_DELAY):
         
-        tau = t - self.Z / constants.C0 # Delay due to wave propagation
+        tau = t - self.Z / constants.C0 # Delay due to wave propagation, inside EQN 1
         
-        # Gaussian-modulated wave
+        # Gaussian-modulated wave, search "modulated gaussian plane wave"
         exponential = np.exp(-((tau - mu) / (2 * sigma))**2)
         carrier = np.cos(2 * np.pi * fm * (tau - mu))
         

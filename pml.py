@@ -1,15 +1,15 @@
 # pml.py
 
 import numpy as np
-from constants import PML_ABSORPTION, PML_DEPTH
+import constants
 
 class PML:
-    def __init__(self, N, dx, c0, depth=PML_DEPTH, absorption=PML_ABSORPTION):
+    def __init__(self, N, dx, c0, depth=constants.PML_DEPTH, absorption=constants.PML_ABSORPTION):
         self.N = N
         self.dx = dx
         self.c0 = c0
         self.depth = depth
-        self.A = absorption  # Absorption per cell in nepers
+        self.A = absorption  # Absorption strength in nepers
         
         self._init_absorption_profiles()
         
@@ -23,18 +23,18 @@ class PML:
                                   ('y', self.alpha_y), 
                                   ('z', self.alpha_z)]:
             
-            # Left/bottom/back boundary
+            # Left boundary
             for i in range(self.depth):
-                # Distance from inner edge (normalized)
+                # Distance from outer edge (normalized)
                 x_rel = (self.depth - 1 - i) / self.depth
                 
                 # EQN 14: quartic taper
                 alpha_val = self.A * (self.c0 / self.dx) * (x_rel ** 4)
                 alpha_array[i] = alpha_val
             
-            # Right/top/front boundary  
+            # Right boundary  
             for i in range(self.depth):
-                # Distance from inner edge (normalized)
+                # Distance from outer edge (normalized)
                 x_rel = i / self.depth
                 
                 # EQN 14: quartic taper
@@ -52,6 +52,7 @@ class PML:
         self.exp_alpha_z_dt_half = None
         
     def set_dt(self, dt):
+        self.dt = dt
         # Terms from EQN 13
         self.exp_alpha_x_dt_half = np.exp(self.alpha_x_3d * dt / 2)
         self.exp_alpha_y_dt_half = np.exp(self.alpha_y_3d * dt / 2)
@@ -74,7 +75,7 @@ class PML:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
         
         # EQN 13: exponential time-stepping
-        u_new = (exp_neg_half * u_prev + dt * rhs) / exp_half
+        u_new = (exp_neg_half * u_prev + dt * rhs) / exp_half # u_new is the usx with +ve dt/2, u_prev is -ve dt/2
         
         return u_new
     
@@ -95,6 +96,6 @@ class PML:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
         
         # EQN 13: exponential time-stepping
-        p_new = (exp_neg_half * p_prev + dt * rhs) / exp_half
+        p_new = (exp_neg_half * p_prev + dt * rhs) / exp_half # same as velocity
         
         return p_new

@@ -7,7 +7,7 @@ RHO0 = 1.22     # Density (kg/m^3)
 C0 = 340.0      # Speed of sound (m/s)
 
 # Default simulation parameters
-DEFAULT_N = 256          # Number of grid points
+DEFAULT_N = 256          # Number of grid points (grid is a cube, Nx = Ny = Nz)
 DEFAULT_DX = 0.02        # Grid spacing (m)
 DEFAULT_DT = 20e-6       # Time step (s)
 
@@ -25,3 +25,6 @@ DEFAULT_DELAY = 60e-3    # Pulse delay (s)
 
 # Sperical winder parameters
 R0 = 2.4 # (m)
+
+# CFL
+CFL = (C0 * DEFAULT_DT) / DEFAULT_DX

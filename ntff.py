@@ -1,9 +1,9 @@
 import numpy as np
-from constants import PML_DEPTH
+import constants
 
 class NTFFTransform:
     
-    def __init__(self, grid_x, grid_y, grid_z, dx, c0, rho0, pml_depth=PML_DEPTH):
+    def __init__(self, grid_x, grid_y, grid_z, dx, c0, rho0, pml_depth=constants.PML_DEPTH):
         self.N = len(grid_x)
         self.dx = dx
         self.c0 = c0
@@ -14,17 +14,17 @@ class NTFFTransform:
         self._create_surface_grid(grid_x, grid_y, grid_z)
         
     def _create_surface_grid(self, grid_x, grid_y, grid_z):
-        idx = self.surface_idx
+        idx = self.surface_idx # PML depth so we can stay outside 
         N = self.N
         interior_slice = slice(idx, N - idx)
         
-        x_int = grid_x[interior_slice]
+        x_int = grid_x[interior_slice] # coordinates of interior region 
         y_int = grid_y[interior_slice]
         z_int = grid_z[interior_slice]
         
-        self.surface_points = []
-        self.surface_normals = []
-        self.surface_indices = []
+        self.surface_points = [] # rprime
+        self.surface_normals = [] # ncap
+        self.surface_indices = [] # (i,j,k) so we can read p and u from 3D arrays
         
         # Face 1: x_min (left, normal = -x)
         x_face = grid_x[idx]
@@ -74,12 +74,11 @@ class NTFFTransform:
                 self.surface_normals.append([0.0, 0.0, 1.0])
                 self.surface_indices.append([idx + i, idx + j, N - idx - 1])
         
-        self.surface_points = np.array(self.surface_points)
+        self.surface_points = np.array(self.surface_points) # convert list to an array
         self.surface_normals = np.array(self.surface_normals)
         self.surface_indices = np.array(self.surface_indices, dtype=int)
 
-        # Thin the NTFF surface to reduce cost
-        stride = 4  # try 4 first, you can change to 2 or 3 if needed
+        stride = 4 # its like "every how much surface points do we keep measurements"
         self.surface_points = self.surface_points[::stride]
         self.surface_normals = self.surface_normals[::stride]
         self.surface_indices = self.surface_indices[::stride]
