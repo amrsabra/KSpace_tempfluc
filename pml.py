@@ -4,7 +4,7 @@ import numpy as np
 import constants
 
 class PML:
-    def __init__(self, N, dx, c0, depth=constants.PML_DEPTH, absorption=constants.PML_ABSORPTION):
+    def __init__(self, N, dx, c0=constants.C0, depth=constants.PML_DEPTH, absorption=constants.PML_ABSORPTION):
         self.N = N
         self.dx = dx
         self.c0 = c0
@@ -12,6 +12,11 @@ class PML:
         self.A = absorption  # Absorption strength in nepers
         
         self._init_absorption_profiles()
+
+        self.exp_neg_alpha_x_dt_half = None
+        self.exp_neg_alpha_y_dt_half = None
+        self.exp_neg_alpha_z_dt_half = None
+
         
     def _init_absorption_profiles(self):
         self.alpha_x = np.zeros(self.N)
@@ -53,10 +58,15 @@ class PML:
         
     def set_dt(self, dt):
         self.dt = dt
-        # Terms from EQN 13
+
         self.exp_alpha_x_dt_half = np.exp(self.alpha_x_3d * dt / 2)
         self.exp_alpha_y_dt_half = np.exp(self.alpha_y_3d * dt / 2)
         self.exp_alpha_z_dt_half = np.exp(self.alpha_z_3d * dt / 2)
+
+        self.exp_neg_alpha_x_dt_half = 1.0 / self.exp_alpha_x_dt_half
+        self.exp_neg_alpha_y_dt_half = 1.0 / self.exp_alpha_y_dt_half
+        self.exp_neg_alpha_z_dt_half = 1.0 / self.exp_alpha_z_dt_half
+
         
     def update_velocity_component(self, u_prev, rhs, dt, direction):
         if self.exp_alpha_x_dt_half is None:
@@ -64,15 +74,16 @@ class PML:
         
         if direction == 'x':
             exp_half = self.exp_alpha_x_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_x_dt_half
         elif direction == 'y':
             exp_half = self.exp_alpha_y_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_y_dt_half
         elif direction == 'z':
             exp_half = self.exp_alpha_z_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_z_dt_half
         else:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
+
         
         # EQN 13: exponential time-stepping
         u_new = (exp_neg_half * u_prev + dt * rhs) / exp_half # u_new is the usx with +ve dt/2, u_prev is -ve dt/2
@@ -85,13 +96,13 @@ class PML:
         
         if direction == 'x':
             exp_half = self.exp_alpha_x_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_x_dt_half
         elif direction == 'y':
             exp_half = self.exp_alpha_y_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_y_dt_half
         elif direction == 'z':
             exp_half = self.exp_alpha_z_dt_half
-            exp_neg_half = 1.0 / exp_half
+            exp_neg_half = self.exp_neg_alpha_z_dt_half
         else:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
         

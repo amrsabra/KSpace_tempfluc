@@ -3,6 +3,7 @@
 
 import numpy as np
 from scipy.special import gamma as gamma_func
+from scipy.fft import fftfreq, ifftn
 import constants
 
 class AtmosphereGenerator:
@@ -50,9 +51,9 @@ class AtmosphereGenerator:
         
         # Create k-space grid
         # * 2 * np.pi because paper uses rad/m not cycle/m. normal fft gives cycle/m as its a frequency
-        kx = np.fft.fftfreq(self.N, self.dx) * 2 * np.pi
-        ky = np.fft.fftfreq(self.N, self.dx) * 2 * np.pi
-        kz = np.fft.fftfreq(self.N, self.dx) * 2 * np.pi
+        kx = fftfreq(self.N, self.dx) * 2 * np.pi
+        ky = fftfreq(self.N, self.dx) * 2 * np.pi
+        kz = fftfreq(self.N, self.dx) * 2 * np.pi
         
         KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing='ij')
         k_mag = np.sqrt(KX**2 + KY**2 + KZ**2) # (kmag + k0)^-11/3
@@ -82,7 +83,7 @@ class AtmosphereGenerator:
         T_k[0, 0, 0] = 0
         
         # Transform to real space
-        T_fluctuation = np.real(np.fft.ifftn(T_k))
+        T_fluctuation = np.real(ifftn(T_k, workers=-1, overwrite_x=True))
         
         # Scale to realistic RMS
         T_rms_target = 1.0  # 1 K RMS

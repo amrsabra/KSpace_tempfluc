@@ -14,23 +14,34 @@ class KSpaceAcousticScattering:
         self.N = N
         self.dx = dx
         self.dt = dt
-
-        # Domain parameters
         self.domain_size = self.N * self.dx
-        self.x = np.linspace(-self.domain_size/2, self.domain_size/2, self.N) # returns [-128,-127,...,127,128]
-        self.y = np.linspace(-self.domain_size/2, self.domain_size/2, self.N)
-        self.z = np.linspace(-self.domain_size/2, self.domain_size/2, self.N)
-        
-        # Create 3D grids
-        self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing='ij')
+
+        # Create spatial grid
+        self.x = (np.arange(N) - N // 2) * dx
+        self.y = (np.arange(N) - N // 2) * dx
+        self.z = (np.arange(N) - N // 2) * dx
+
+        # 3D grids
+        self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing="ij")
         self.R = np.sqrt(self.X**2 + self.Y**2 + self.Z**2)
-        
-        # Initialize components
-        self.kspace_ops = KSpaceOperators(self.N, self.dx, self.dt, constants.C0)
-        self.pml = PML(self.N, self.dx, constants.C0, constants.PML_DEPTH, constants.PML_ABSORPTION)
+
+        # Operators, PML, incident field, NTFF
+        self.kspace_ops = KSpaceOperators(N, dx)
+        self.pml = PML(N, dx)
         self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx)
         self.incident = IncidentWave(self.X, self.Y, self.Z)
-        self.ntff = NTFFTransform(self.x, self.y, self.z, self.dx, constants.C0, constants.RHO0, constants.PML_DEPTH)
+        self.ntff = NTFFTransform(self.x, self.y, self.z, dx,
+                                  constants.C0, constants.RHO0, constants.PML_DEPTH)
+
+        # Precompute far-field directions once
+        self.angles_deg = np.linspace(-180, 180, 360, endpoint=False)
+        directions = np.zeros((len(self.angles_deg), 3))
+        for i, angle_deg in enumerate(self.angles_deg):
+            angle_rad = np.deg2rad(angle_deg)
+            directions[i] = [np.sin(angle_rad), 0.0, np.cos(angle_rad)]
+
+        # Precompute NTFF coefficients once for this grid and dt
+        self.ntff.precompute_coefficients(directions, self.dt)
         
         
     def create_bragg_atmosphere(self, fm, DT=1.0, r0=constants.R0):
@@ -44,16 +55,12 @@ class KSpaceAcousticScattering:
         self.tau = tau
         self.delay = delay
 
-        # Far-field directions
-        angles_deg = np.linspace(-180, 180, 360, endpoint=False)
-        directions = np.zeros((len(angles_deg), 3))
-        for i, angle_deg in enumerate(angles_deg): # i is an array with three components declared in line before, NTFF needs direction split into components to project velocity onto direction d
-            angle_rad = np.deg2rad(angle_deg) # np expects rad not deg.
-            directions[i] = [np.sin(angle_rad), 0.0, np.cos(angle_rad)] # "far-field directions were modeled spaced at equal angles over the y = 0 plane."
-        
-        self.ntff.precompute_coefficients(directions, self.dt) # precomputes all the geometric factors and time weights in EQN 15.
-        self.ntff.initialize_buffer(n_steps) # Creates np.zeros array of dir*nsteps
-        self.pml.set_dt(self.dt) # Tell the PML object what the time step is.
+        # Directions and coefficients already precomputed in __init__
+        angles_deg = self.angles_deg
+
+        # NTFF time buffer for this run
+        self.ntff.initialize_buffer(n_steps)
+        self.pml.set_dt(self.dt)
 
         # Initialize scattered fields (split into directional components for PML)
         # Current time step fields
@@ -80,46 +87,48 @@ class KSpaceAcousticScattering:
         print(f"Simulating {n_steps} time steps")
         start_time = time.time()
 
+        # Cache previous incident velocity once
+        _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay)
+
         for step in range(n_steps):
             # Every update (incident field, source term, NTFF) depends on the physical time, not just the index.
             t = step * self.dt # its like frame number * number of frames; it's the timestamp in the simulation
             
             # Incident field and source term (EQN 9)
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
-            p_i_prev, u_i_z_prev = self.incident.plane_wave(t - self.dt, fm, tau, delay)
             duiz_dt = (u_i_z - u_i_z_prev) / self.dt
+            u_i_z_prev = u_i_z
+
             source_term = (constants.RHO0 - rho) * duiz_dt # EQN 9
             
             p_s = px_s + py_s + pz_s
-            
-            # Update velocity (EQN 9 with PML from EQN 13)
-            dpdx = self.kspace_ops.derivative(p_s, 'x')
+                
+            # Velocity update (Eq 9 + PML), using shared FFT for dp/dx,dp/dy,dp/dz
+            dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s)
+
             rhs_ux = -dpdx / rho
-            ux_s_new = self.pml.update_velocity_component(ux_s_prev, rhs_ux, self.dt, 'x')
-            
-            dpdy = self.kspace_ops.derivative(p_s, 'y')
             rhs_uy = -dpdy / rho
-            uy_s_new = self.pml.update_velocity_component(uy_s_prev, rhs_uy, self.dt, 'y')
-            
-            dpdz = self.kspace_ops.derivative(p_s, 'z')
             rhs_uz = -dpdz / rho + source_term / rho
+
+            ux_s_new = self.pml.update_velocity_component(ux_s_prev, rhs_ux, self.dt, 'x')
+            uy_s_new = self.pml.update_velocity_component(uy_s_prev, rhs_uy, self.dt, 'y')
             uz_s_new = self.pml.update_velocity_component(uz_s_prev, rhs_uz, self.dt, 'z')
-            
+
             ux_s_prev, uy_s_prev, uz_s_prev = ux_s, uy_s, uz_s
             ux_s, uy_s, uz_s = ux_s_new, uy_s_new, uz_s_new
             
             # Update pressure (EQN 10 with PML from EQN 13)
             duxdx = self.kspace_ops.derivative(ux_s, 'x')
             rhs_px = -constants.RHO0 * constants.C0**2 * duxdx
-            px_s_new = self.pml.update_pressure_component(px_s_prev, rhs_px, self.dt, 'x')
+            px_s_new = self.pml.update_pressure_component(px_s_prev, rhs_px, self.dt, 'x') # add the PML damping to RHS
             
             duydy = self.kspace_ops.derivative(uy_s, 'y')
             rhs_py = -constants.RHO0 * constants.C0**2 * duydy
-            py_s_new = self.pml.update_pressure_component(py_s_prev, rhs_py, self.dt, 'y')
+            py_s_new = self.pml.update_pressure_component(py_s_prev, rhs_py, self.dt, 'y') # add the PML damping to RHS
             
             duzdz = self.kspace_ops.derivative(uz_s, 'z')
             rhs_pz = -constants.RHO0 * constants.C0**2 * duzdz
-            pz_s_new = self.pml.update_pressure_component(pz_s_prev, rhs_pz, self.dt, 'z')
+            pz_s_new = self.pml.update_pressure_component(pz_s_prev, rhs_pz, self.dt, 'z') # add the PML damping to RHS
             
             px_s_prev, py_s_prev, pz_s_prev = px_s, py_s, pz_s
             px_s, py_s, pz_s = px_s_new, py_s_new, pz_s_new
