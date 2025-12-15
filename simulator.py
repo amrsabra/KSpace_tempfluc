@@ -26,7 +26,7 @@ class KSpaceAcousticScattering:
         self.R = np.sqrt(self.X**2 + self.Y**2 + self.Z**2)
 
         # Operators, PML, incident field, NTFF
-        self.kspace_ops = KSpaceOperators(N, dx)
+        self.kspace_ops = KSpaceOperators(N, dx, dt)
         self.pml = PML(N, dx)
         self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx)
         self.incident = IncidentWave(self.X, self.Y, self.Z)
@@ -34,7 +34,7 @@ class KSpaceAcousticScattering:
                                   constants.C0, constants.RHO0, constants.PML_DEPTH)
 
         # Precompute far-field directions once
-        self.angles_deg = np.linspace(-180, 180, 360, endpoint=False)
+        self.angles_deg = np.linspace(-180.0, 180.0, 360, endpoint=False)
         directions = np.zeros((len(self.angles_deg), 3))
         for i, angle_deg in enumerate(self.angles_deg):
             angle_rad = np.deg2rad(angle_deg)

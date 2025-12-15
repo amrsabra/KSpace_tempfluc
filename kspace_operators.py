@@ -2,11 +2,14 @@
 
 import numpy as np
 from scipy.fft import fftn, ifftn, fft, ifft, fftfreq
+import constants
 
 class KSpaceOperators:
-    def __init__(self, N, dx):
+    def __init__(self, N, dx, dt, c0=constants.C0):
         self.N = N
         self.dx = dx
+        self.dt = dt
+        self.c0 = c0
 
         kx = 2 * np.pi * fftfreq(N, d=dx)
         ky = 2 * np.pi * fftfreq(N, d=dx)
@@ -14,8 +17,8 @@ class KSpaceOperators:
         self.KX, self.KY, self.KZ = np.meshgrid(kx, ky, kz, indexing='ij')
 
         k_mag = np.sqrt(self.KX**2 + self.KY**2 + self.KZ**2)
-        k_mag[k_mag == 0] = 1.0
-        self.sinc_term = np.sinc(k_mag * dx / (2 * np.pi))
+        k_mag[0, 0, 0] = 1.0
+        self.sinc_term = np.sinc(self.c0 * self.dt * k_mag / (2.0 * np.pi)) # eqn 11
         
     def derivative(self, field, axis):
         field_k = fftn(field, workers=-1, overwrite_x=True)
@@ -34,7 +37,7 @@ class KSpaceOperators:
     
     def derivatives_xyz(self, field):
         """Compute dp/dx, dp/dy, dp/dz sharing a single FFT of field."""
-        field_k = fftn(field)
+        field_k = fftn(field, workers=-1, overwrite_x=True)
 
         deriv_x_k = 1j * self.KX * self.sinc_term * field_k
         deriv_y_k = 1j * self.KY * self.sinc_term * field_k
