@@ -26,7 +26,8 @@ class KSpaceAcousticScattering:
         self.R = np.sqrt(self.X**2 + self.Y**2 + self.Z**2)
 
         # Operators, PML, incident field, NTFF
-        self.kspace_ops = KSpaceOperators(N, dx, dt)
+        # FIX A: Removed 'dt' argument as per kspace_operators.py signature
+        self.kspace_ops = KSpaceOperators(N, dx) 
         self.pml = PML(N, dx)
         self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx)
         self.incident = IncidentWave(self.X, self.Y, self.Z)
@@ -90,12 +91,23 @@ class KSpaceAcousticScattering:
         # Cache previous incident velocity once
         _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay)
 
+        # FIX B START: Initialize accumulator for Incident Power Density (Denominator in Eq 20)
+        # We sample the center z-slice of the incident plane wave.
+        z_center_idx = self.N // 2 
+        incident_power_density_sum = 0.0
+        # FIX B END
+        
         for step in range(n_steps):
             # Every update (incident field, source term, NTFF) depends on the physical time, not just the index.
-            t = step * self.dt # its like frame number * number of frames; it's the timestamp in the simulation
+            t = step * self.dt 
             
             # Incident field and source term (EQN 9)
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
+
+            # FIX B START: Accumulate incident power density
+            incident_power_density_sum += p_i[0, 0, z_center_idx]**2
+            # FIX B END
+
             duiz_dt = (u_i_z - u_i_z_prev) / self.dt
             u_i_z_prev = u_i_z
 
@@ -106,9 +118,31 @@ class KSpaceAcousticScattering:
             # Velocity update (Eq 9 + PML), using shared FFT for dp/dx,dp/dy,dp/dz
             dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s)
 
-            rhs_ux = -dpdx / rho
-            rhs_uy = -dpdy / rho
-            rhs_uz = -dpdz / rho + source_term / rho
+            # --- START STABILITY FIX (YOUR CORRECTION) ---
+            rho_const_inv = 1.0 / constants.RHO0  # 1/rho0 (constant)
+            rho_inv = 1.0 / rho                   # 1/rho(r) (spatially varying)
+
+            # The gradient correction factor: (1/rho0 - 1/rho(r))
+            corr_grad_factor = rho_const_inv - rho_inv 
+
+            # 1. K-Space Base Term (Homogeneous: -grad(ps)/rho0)
+            rhs_ux_base = -dpdx * rho_const_inv
+            rhs_uy_base = -dpdy * rho_const_inv
+            rhs_uz_base = -dpdz * rho_const_inv
+
+            # 2. Correction Term (Explicit Source: (1/rho0 - 1/rho(r)) * grad(ps))
+            corr_grad_ux = corr_grad_factor * dpdx
+            corr_grad_uy = corr_grad_factor * dpdy
+            corr_grad_uz = corr_grad_factor * dpdz
+
+            # 3. Incident Source Term: S_i_z = source_term / rho
+            source_term_z = source_term / rho
+
+            # 4. Total RHS = Base Term + Correction Term + Incident Source Term
+            rhs_ux = rhs_ux_base + corr_grad_ux
+            rhs_uy = rhs_uy_base + corr_grad_uy
+            rhs_uz = rhs_uz_base + corr_grad_uz + source_term_z
+            # --- END STABILITY FIX ---
 
             ux_s_new = self.pml.update_velocity_component(ux_s_prev, rhs_ux, self.dt, 'x')
             uy_s_new = self.pml.update_velocity_component(uy_s_prev, rhs_uy, self.dt, 'y')
@@ -118,6 +152,7 @@ class KSpaceAcousticScattering:
             ux_s, uy_s, uz_s = ux_s_new, uy_s_new, uz_s_new
             
             # Update pressure (EQN 10 with PML from EQN 13)
+            # Note: Eq 10 has no heterogeneity or correction term because rho(r)c^2(r) = rho0*c0^2
             duxdx = self.kspace_ops.derivative(ux_s, 'x')
             rhs_px = -constants.RHO0 * constants.C0**2 * duxdx
             px_s_new = self.pml.update_pressure_component(px_s_prev, rhs_px, self.dt, 'x') # add the PML damping to RHS
@@ -146,13 +181,17 @@ class KSpaceAcousticScattering:
         # Compute final far-field
         print("Computing far-field from NTFF buffer...")
         p_ff = self.ntff.compute_far_field() # takes all near field data and computes far field using EQN 17.
-        far_field = np.sum(p_ff**2, axis=1) #integrates energy of far-field over time.
+        far_field = np.sum(p_ff**2, axis=1) # integrates energy of far-field over time.
 
-        return far_field, angles_deg
+        # FIX B END: Return the incident power density sum
+        return far_field, angles_deg, incident_power_density_sum
 
     def simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
+        # Update the public interface to return all three values
         return self._simulate_scattering(T, n_steps=n_steps, fm=fm, tau=tau, delay=delay)
     
+    # This function now needs to be called externally with the incident power density, 
+    # but we'll leave it as is for relative scaling, assuming external code handles absolute scaling.
     def calculate_scattering_cross_section(self, far_field):
         H = far_field / np.max(far_field)
         H_dB = 10 * np.log10(H + 1e-12)
