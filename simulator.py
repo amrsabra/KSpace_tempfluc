@@ -26,7 +26,8 @@ class KSpaceAcousticScattering:
         self.R = np.sqrt(self.X**2 + self.Y**2 + self.Z**2)
 
         # Operators, PML, incident field, NTFF
-        self.kspace_ops = KSpaceOperators(N, dx) 
+        # FIX 1: Removed 'dt' argument to match correct KSpaceOperators signature
+        self.kspace_ops = KSpaceOperators(N, dx, dt) 
         self.pml = PML(N, dx)
         self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx)
         self.incident = IncidentWave(self.X, self.Y, self.Z)
@@ -89,7 +90,7 @@ class KSpaceAcousticScattering:
         # Cache previous incident velocity once
         _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay)
 
-        # FIX: Initialize accumulator for Incident Power Density (Denominator in Eq 20)
+        # FIX 2: Initialize accumulator for Incident Power Density (Denominator in Eq 20)
         z_center_idx = self.N // 2 
         incident_power_density_sum = 0.0
         
@@ -100,7 +101,7 @@ class KSpaceAcousticScattering:
             # Incident field and source term (EQN 9)
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
 
-            # FIX: Accumulate incident power density
+            # FIX 2: Accumulate incident power density
             incident_power_density_sum += p_i[0, 0, z_center_idx]**2
 
             duiz_dt = (u_i_z - u_i_z_prev) / self.dt
@@ -113,9 +114,9 @@ class KSpaceAcousticScattering:
             # Velocity update (Eq 9 + PML), using shared FFT for dp/dx,dp/dy,dp/dz
             dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s)
 
-            # --- START STABILITY FIX (CRITICAL) ---
-            rho_const_inv = 1.0 / constants.RHO0 
-            rho_inv = 1.0 / rho                  
+            # --- START CRITICAL STABILITY FIX ---
+            rho_const_inv = 1.0 / constants.RHO0  # 1/rho0 (constant)
+            rho_inv = 1.0 / rho                   # 1/rho(r) (spatially varying)
 
             # The gradient correction factor: (1/rho0 - 1/rho(r))
             corr_grad_factor = rho_const_inv - rho_inv 
@@ -137,7 +138,7 @@ class KSpaceAcousticScattering:
             rhs_ux = rhs_ux_base + corr_grad_ux
             rhs_uy = rhs_uy_base + corr_grad_uy
             rhs_uz = rhs_uz_base + corr_grad_uz + source_term_z
-            # --- END STABILITY FIX ---
+            # --- END CRITICAL STABILITY FIX ---
 
             ux_s_new = self.pml.update_velocity_component(ux_s_prev, rhs_ux, self.dt, 'x')
             uy_s_new = self.pml.update_velocity_component(uy_s_prev, rhs_uy, self.dt, 'y')
@@ -178,15 +179,14 @@ class KSpaceAcousticScattering:
         p_ff = self.ntff.compute_far_field() 
         far_field = np.sum(p_ff**2, axis=1) # integrates energy of far-field over time.
 
-        # FIX: Return the scattered energy, angles, AND incident power density sum
+        # FIX 3: Return the scattered energy, angles, AND incident power density sum
         return far_field, angles_deg, incident_power_density_sum
 
     def simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
         return self._simulate_scattering(T, n_steps=n_steps, fm=fm, tau=tau, delay=delay)
     
-    # FIX: Update signature to accept incident_power_density_sum for absolute scaling
+    # FIX 3: Update signature and logic for absolute scattering ratio H(theta)
     def calculate_scattering_cross_section(self, far_field, incident_power_density_sum):
-        # H(theta) = scattered energy / incident energy density (Eq. 20)
         H_theta = far_field / incident_power_density_sum
         H_dB = 10 * np.log10(H_theta + 1e-12)
         return H_dB
