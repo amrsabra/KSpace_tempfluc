@@ -1,7 +1,7 @@
-#kspace_operators.py
+# kspace_operators.py
 
 import numpy as np
-from scipy.fft import fftn, ifftn, fft, ifft, fftfreq
+from scipy.fft import fftn, ifftn, fftfreq
 import constants
 
 class KSpaceOperators:
@@ -17,11 +17,15 @@ class KSpaceOperators:
         self.KX, self.KY, self.KZ = np.meshgrid(kx, ky, kz, indexing='ij')
 
         k_mag = np.sqrt(self.KX**2 + self.KY**2 + self.KZ**2)
-        k_mag[0, 0, 0] = 1.0
-        self.sinc_term = np.sinc(self.c0 * self.dt * k_mag / (2.0 * np.pi)) # eqn 11
+        # Avoid division by zero at DC
+        k_mag[0, 0, 0] = 1.0 
+        
+        # Eq 11: Sinc correction for numerical dispersion
+        # sinc(x) in numpy is sin(pi*x)/(pi*x), so we scale argument by 1/pi
+        self.sinc_term = np.sinc(self.c0 * self.dt * k_mag / (2.0 * np.pi)) 
         
     def derivative(self, field, axis):
-        field_k = fftn(field, workers=-1, overwrite_x=True)
+        field_k = fftn(field, workers=-1)
 
         if axis == 'x':
             deriv_k = 1j * self.KX * self.sinc_term * field_k
@@ -32,18 +36,18 @@ class KSpaceOperators:
         else:
             raise ValueError("axis must be 'x', 'y', or 'z'")
 
-        deriv = ifftn(deriv_k, workers=-1, overwrite_x=True)
+        deriv = ifftn(deriv_k, workers=-1)
         return np.real(deriv)
     
     def derivatives_xyz(self, field):
         """Compute dp/dx, dp/dy, dp/dz sharing a single FFT of field."""
-        field_k = fftn(field, workers=-1, overwrite_x=True)
+        field_k = fftn(field, workers=-1)
 
         deriv_x_k = 1j * self.KX * self.sinc_term * field_k
         deriv_y_k = 1j * self.KY * self.sinc_term * field_k
         deriv_z_k = 1j * self.KZ * self.sinc_term * field_k
 
-        dx = np.real(ifftn(deriv_x_k, workers=-1, overwrite_x=True))
-        dy = np.real(ifftn(deriv_y_k, workers=-1, overwrite_x=True))
-        dz = np.real(ifftn(deriv_z_k, workers=-1, overwrite_x=True))
+        dx = np.real(ifftn(deriv_x_k, workers=-1))
+        dy = np.real(ifftn(deriv_y_k, workers=-1))
+        dz = np.real(ifftn(deriv_z_k, workers=-1))
         return dx, dy, dz
