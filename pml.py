@@ -84,11 +84,14 @@ class PML:
         else:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
 
+        # EQN 13: exponential time-stepping (IN-PLACE)
+        # Formula: u_new = (exp_neg_half * u_prev + dt * rhs) / exp_half
         
-        # EQN 13: exponential time-stepping
-        u_new = (exp_neg_half * u_prev + dt * rhs) / exp_half # u_new is the usx with +ve dt/2, u_prev is -ve dt/2
+        u_prev *= exp_neg_half
+        u_prev += (dt * rhs)
+        u_prev /= exp_half
         
-        return u_new
+        return u_prev
     
     def update_pressure_component(self, p_prev, rhs, dt, direction):
         if self.exp_alpha_x_dt_half is None:
@@ -106,7 +109,10 @@ class PML:
         else:
             raise ValueError("Direction must be 'x', 'y', or 'z'")
         
-        # EQN 13: exponential time-stepping
-        p_new = (exp_neg_half * p_prev + dt * rhs) / exp_half # same as velocity
+        # EQN 13: exponential time-stepping (IN-PLACE)
         
-        return p_new
+        p_prev *= exp_neg_half
+        p_prev += (dt * rhs)
+        p_prev /= exp_half
+        
+        return p_prev

@@ -69,14 +69,6 @@ class KSpaceAcousticScattering:
         uy_s = np.zeros((self.N, self.N, self.N))
         uz_s = np.zeros((self.N, self.N, self.N))
         
-        ux_s_prev = np.zeros((self.N, self.N, self.N))
-        uy_s_prev = np.zeros((self.N, self.N, self.N))
-        uz_s_prev = np.zeros((self.N, self.N, self.N))
-        
-        px_s_prev = np.zeros((self.N, self.N, self.N))
-        py_s_prev = np.zeros((self.N, self.N, self.N))
-        pz_s_prev = np.zeros((self.N, self.N, self.N))
-        
         # Medium properties
         rho = constants.RHO0 * constants.T0 / T 
         
@@ -91,10 +83,14 @@ class KSpaceAcousticScattering:
         _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay)
         z_center_idx = self.N // 2 
         incident_power_density_sum = 0.0
+
+        # Temporary buffers for summed fields
+        p_s_total = np.zeros_like(px_s)
         
         for step in range(n_steps):
             t = step * self.dt 
-            
+
+            # 1) Incident Wave Source
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
             incident_power_density_sum += p_i[0, 0, z_center_idx]**2
 
@@ -102,41 +98,37 @@ class KSpaceAcousticScattering:
             u_i_z_prev = u_i_z
 
             source_term = (constants.RHO0 - rho) * duiz_dt
-            p_s = px_s + py_s + pz_s
+            
+            # Sum pressure components for gradient calc
+            p_s_total[:] = px_s + py_s + pz_s
                 
-            # --- CRITICAL STABILITY LOGIC ---
-            dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s)
+            # 2) Calculate Gradients
+            dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s_total)
 
             rhs_ux = -dpdx * rho_const_inv + (corr_grad_factor * dpdx)
             rhs_uy = -dpdy * rho_const_inv + (corr_grad_factor * dpdy)
             rhs_uz = -dpdz * rho_const_inv + (corr_grad_factor * dpdz) + (source_term / rho)
-            # --------------------------------
 
-            ux_s_new = self.pml.update_velocity_component(ux_s_prev, rhs_ux, self.dt, 'x')
-            uy_s_new = self.pml.update_velocity_component(uy_s_prev, rhs_uy, self.dt, 'y')
-            uz_s_new = self.pml.update_velocity_component(uz_s_prev, rhs_uz, self.dt, 'z')
-
-            ux_s_prev, uy_s_prev, uz_s_prev = ux_s, uy_s, uz_s
-            ux_s, uy_s, uz_s = ux_s_new, uy_s_new, uz_s_new
-            
-            # Pressure Update
+            # 3) Update Velocities 
+            self.pml.update_velocity_component(ux_s, rhs_ux, self.dt, 'x')
+            self.pml.update_velocity_component(uy_s, rhs_uy, self.dt, 'y')
+            self.pml.update_velocity_component(uz_s, rhs_uz, self.dt, 'z')
+        
+            # 4) Update Pressure
             duxdx = self.kspace_ops.derivative(ux_s, 'x')
             rhs_px = -constants.RHO0 * constants.C0**2 * duxdx
-            px_s_new = self.pml.update_pressure_component(px_s_prev, rhs_px, self.dt, 'x') 
+            self.pml.update_pressure_component(px_s, rhs_px, self.dt, 'x') 
             
             duydy = self.kspace_ops.derivative(uy_s, 'y')
             rhs_py = -constants.RHO0 * constants.C0**2 * duydy
-            py_s_new = self.pml.update_pressure_component(py_s_prev, rhs_py, self.dt, 'y') 
+            self.pml.update_pressure_component(py_s, rhs_py, self.dt, 'y') 
             
             duzdz = self.kspace_ops.derivative(uz_s, 'z')
             rhs_pz = -constants.RHO0 * constants.C0**2 * duzdz
-            pz_s_new = self.pml.update_pressure_component(pz_s_prev, rhs_pz, self.dt, 'z') 
+            self.pml.update_pressure_component(pz_s, rhs_pz, self.dt, 'z')
             
-            px_s_prev, py_s_prev, pz_s_prev = px_s, py_s, pz_s
-            px_s, py_s, pz_s = px_s_new, py_s_new, pz_s_new
-            
-            # NTFF
-            p_s_total = px_s + py_s + pz_s
+            # 5) NTFF
+            p_s_total[:] = px_s + py_s + pz_s
             self.ntff.accumulate(p_s_total, ux_s, uy_s, uz_s, step)
 
             if (step + 1) % 100 == 0:

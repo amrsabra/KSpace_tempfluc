@@ -2,257 +2,228 @@ import numpy as np
 from numba import njit, prange
 import constants
 
-
 @njit(parallel=True, fastmath=True)
-def accumulate_core(
+def accumulate_core_on_the_fly(
     p_surf,
-    u_surf,
+    ux_surf, uy_surf, uz_surf,
+    surface_points,
     surface_normals,
-    time_idx_floor,
-    time_weight,
-    geometric_weights,
+    directions,
     far_field_buffer,
     dx,
     c0,
     rho0,
     n_time_steps,
     time_step,
+    dt
 ):
-    """Core NTFF accumulation loop (Eq. 17).
-
-    Notes
-    -----
-    * Only the outer loop (over directions) is parallelised.
-      The inner loop (over surface points) is serial to avoid
-      race conditions when multiple surface points contribute
-      to the same (direction, time) bin in ``far_field_buffer``.
-    * The time indexing follows the paper's definition of
-      t0 = t + (r_hat · r') / c0, implemented via a precomputed
-      integer floor offset (time_idx_floor) and linear
-      interpolation weight (time_weight).
     """
-    n_dirs, n_surface_points = geometric_weights.shape
+    Computes NTFF contributions on-the-fly to save RAM.
+    Replaces the massive lookup table with compute ops.
+    """
+    n_dirs = directions.shape[0]
+    n_surface_points = surface_points.shape[0]
     dS = dx * dx
-
+    
+    # Iterate over directions in parallel (Thread-Safe writing to far_field_buffer rows)
     for i_dir in prange(n_dirs):
-        # serial loop over surface points to avoid concurrent writes
+        
+        # Pre-load direction vector for this thread
+        rx = directions[i_dir, 0]
+        ry = directions[i_dir, 1]
+        rz = directions[i_dir, 2]
+        
         for i_pt in range(n_surface_points):
-            # Surface normal at this point
-            n_hat = surface_normals[i_pt]
-
-            # Retarded time index (integer part)
-            t_target = time_step - time_idx_floor[i_dir, i_pt]
-            if t_target < 0 or t_target >= n_time_steps:
+            # 1. Geometry Calculation (Replaces Lookup Table)
+            # Surface Point
+            px = surface_points[i_pt, 0]
+            py = surface_points[i_pt, 1]
+            pz = surface_points[i_pt, 2]
+            
+            # Surface Normal
+            nx = surface_normals[i_pt, 0]
+            ny = surface_normals[i_pt, 1]
+            nz = surface_normals[i_pt, 2]
+            
+            # Dot Products
+            # r_hat . r' (Retardation distance)
+            r_dot_p = rx*px + ry*py + rz*pz
+            
+            # n_hat . r_hat (Geometric weight)
+            # Note: For far-field Green's function, we need n_hat . r_hat term
+            n_dot_r = nx*rx + ny*ry + nz*rz
+            
+            # 2. Time Indexing
+            # retardation = (r_hat . r') / c0
+            # t_ret = t - (r_hat . r')/c0
+            # We map this to indices.
+            retardation_val = r_dot_p / c0
+            retardation_idx = retardation_val / dt
+            
+            # Floor and Weight
+            idx_floor = int(np.floor(retardation_idx))
+            w = retardation_idx - idx_floor
+            
+            # Target Time Bin
+            # The paper defines t' = t + (r_hat . r')/c0
+            # In discrete steps: k' = k + idx_floor
+            # However, usually we populate buffer at [k - idx] or similar depending on sign convention.
+            # Based on previous code: t_target = time_step - time_idx_floor
+            t_target = time_step - idx_floor
+            
+            # Boundary Check
+            if t_target < 0 or t_target >= n_time_steps - 1:
                 continue
 
-            # Pressure contribution: (n̂ · r̂) p / c0
-            n_dot_r = geometric_weights[i_dir, i_pt]
-            pressure_contrib = n_dot_r * p_surf[i_pt] / c0
+            # 3. Physics Accumulation
+            # Pressure term: (n . r) * p / c0
+            p_val = p_surf[i_pt]
+            term_p = n_dot_r * p_val / c0
+            
+            # Velocity term: rho0 * (n . u)
+            u_dot_n = ux_surf[i_pt]*nx + uy_surf[i_pt]*ny + uz_surf[i_pt]*nz
+            term_u = rho0 * u_dot_n
+            
+            integrand = (term_p + term_u) * dS
 
-            # Velocity contribution: ρ0 (n̂ · u)
-            n_dot_u = (
-                n_hat[0] * u_surf[i_pt, 0]
-                + n_hat[1] * u_surf[i_pt, 1]
-                + n_hat[2] * u_surf[i_pt, 2]
-            )
-            velocity_contrib = rho0 * n_dot_u
-
-            integrand = pressure_contrib + velocity_contrib
-
-            # Linear interpolation in time between neighbouring bins
-            w = time_weight[i_dir, i_pt]
-            far_field_buffer[i_dir, t_target] += integrand * dS * (1.0 - w)
-            if t_target + 1 < n_time_steps:
-                far_field_buffer[i_dir, t_target + 1] += integrand * dS * w
+            # Linear Interpolation update
+            # far_field_buffer[i_dir, t] += integrand * (1-w)
+            # far_field_buffer[i_dir, t+1] += integrand * w
+            far_field_buffer[i_dir, t_target] += integrand * (1.0 - w)
+            far_field_buffer[i_dir, t_target + 1] += integrand * w
 
 
 class NTFFTransform:
-    """Near-to-far-field (NTFF) transform for the scattered field.
-
-    This implements Eq. (17) of the paper for a cubic surface S
-    surrounding the scattering volume, placed just inside the PML.
+    """Near-to-far-field (NTFF) transform optimized for memory efficiency.
+    Calculates geometric coefficients on-the-fly rather than storing 
+    massive lookup tables.
     """
 
     def __init__(self, grid_x, grid_y, grid_z, dx, c0, rho0, pml_depth=constants.PML_DEPTH):
-        self.N = len(grid_x)
         self.dx = dx
         self.c0 = c0
         self.rho0 = rho0
         self.pml_depth = pml_depth
-
-        # Index of the inner PML boundary where the NTFF surface is placed
+        
+        # Setup Surface Geometry
+        # We only store the points and normals (~10MB total for N=256)
+        # instead of the ~4GB required for the full coefficient table.
         self.surface_idx = pml_depth
         self._create_surface_grid(grid_x, grid_y, grid_z)
+        
+        self.far_field_buffer = None
+        self.directions = None
+        self.dt = None
 
     def _create_surface_grid(self, grid_x, grid_y, grid_z):
-        idx = self.surface_idx  # one cell inside the PML
-        N = self.N
-        interior_slice = slice(idx, N - idx)
+        idx = self.surface_idx
+        Nx, Ny, Nz = len(grid_x), len(grid_y), len(grid_z)
+        
+        # Lists to gather data
+        indices = []
+        points = []
+        normals = []
+        
+        # Helper to add face
+        def add_face(i_range, j_range, k_range, norm):
+            # Create meshgrid for this face
+            I, J, K = np.meshgrid(i_range, j_range, k_range, indexing='ij')
+            I, J, K = I.flatten(), J.flatten(), K.flatten()
+            
+            # Store Indices
+            # Note: We stack them to be (n_pts, 3)
+            face_indices = np.stack((I, J, K), axis=1)
+            indices.append(face_indices)
+            
+            # Store Points
+            face_pts = np.stack((grid_x[I], grid_y[J], grid_z[K]), axis=1)
+            points.append(face_pts)
+            
+            # Store Normals
+            n_pts = len(I)
+            face_norms = np.tile(norm, (n_pts, 1))
+            normals.append(face_norms)
 
-        x_int = grid_x[interior_slice]
-        y_int = grid_y[interior_slice]
-        z_int = grid_z[interior_slice]
+        # Interior ranges
+        inner_x = np.arange(idx, Nx - idx)
+        inner_y = np.arange(idx, Ny - idx)
+        inner_z = np.arange(idx, Nz - idx)
+        
+        # Face 1: x_min (-x)
+        add_face([idx], inner_y, inner_z, [-1.0, 0.0, 0.0])
+        # Face 2: x_max (+x)
+        add_face([Nx-idx-1], inner_y, inner_z, [1.0, 0.0, 0.0])
+        
+        # Face 3: y_min (-y)
+        add_face(inner_x, [idx], inner_z, [0.0, -1.0, 0.0])
+        # Face 4: y_max (+y)
+        add_face(inner_x, [Ny-idx-1], inner_z, [0.0, 1.0, 0.0])
+        
+        # Face 5: z_min (-z)
+        add_face(inner_x, inner_y, [idx], [0.0, 0.0, -1.0])
+        # Face 6: z_max (+z)
+        add_face(inner_x, inner_y, [Nz-idx-1], [0.0, 0.0, 1.0])
 
-        self.surface_points = []   # r'
-        self.surface_normals = []  # n̂
-        self.surface_indices = []  # (i, j, k) indices into 3D arrays
-
-        # Face 1: x_min (left, normal = -x)
-        x_face = grid_x[idx]
-        for j, y in enumerate(y_int):
-            for k, z in enumerate(z_int):
-                self.surface_points.append([x_face, y, z])
-                self.surface_normals.append([-1.0, 0.0, 0.0])
-                self.surface_indices.append([idx, idx + j, idx + k])
-
-        # Face 2: x_max (right, normal = +x)
-        x_face = grid_x[N - idx - 1]
-        for j, y in enumerate(y_int):
-            for k, z in enumerate(z_int):
-                self.surface_points.append([x_face, y, z])
-                self.surface_normals.append([1.0, 0.0, 0.0])
-                self.surface_indices.append([N - idx - 1, idx + j, idx + k])
-
-        # Face 3: y_min (front, normal = -y)
-        y_face = grid_y[idx]
-        for i, x in enumerate(x_int):
-            for k, z in enumerate(z_int):
-                self.surface_points.append([x, y_face, z])
-                self.surface_normals.append([0.0, -1.0, 0.0])
-                self.surface_indices.append([idx + i, idx, idx + k])
-
-        # Face 4: y_max (back, normal = +y)
-        y_face = grid_y[N - idx - 1]
-        for i, x in enumerate(x_int):
-            for k, z in enumerate(z_int):
-                self.surface_points.append([x, y_face, z])
-                self.surface_normals.append([0.0, 1.0, 0.0])
-                self.surface_indices.append([idx + i, N - idx - 1, idx + k])
-
-        # Face 5: z_min (bottom, normal = -z)
-        z_face = grid_z[idx]
-        for i, x in enumerate(x_int):
-            for j, y in enumerate(y_int):
-                self.surface_points.append([x, y, z_face])
-                self.surface_normals.append([0.0, 0.0, -1.0])
-                self.surface_indices.append([idx + i, idx + j, idx])
-
-        # Face 6: z_max (top, normal = +z)
-        z_face = grid_z[N - idx - 1]
-        for i, x in enumerate(x_int):
-            for j, y in enumerate(y_int):
-                self.surface_points.append([x, y, z_face])
-                self.surface_normals.append([0.0, 0.0, 1.0])
-                self.surface_indices.append([idx + i, idx + j, N - idx - 1])
-
-        # Convert lists to arrays
-        self.surface_points = np.array(self.surface_points, dtype=np.float64)
-        self.surface_normals = np.array(self.surface_normals, dtype=np.float64)
-        self.surface_indices = np.array(self.surface_indices, dtype=np.int64)
-
-        # Optional stride (keep every 'stride'-th surface point)
-        stride = 1
-        self.surface_points = self.surface_points[::stride]
-        self.surface_normals = self.surface_normals[::stride]
-        self.surface_indices = self.surface_indices[::stride]
-
+        # Concatenate and convert to arrays
+        self.surface_indices = np.vstack(indices).astype(np.int64)
+        self.surface_points = np.vstack(points).astype(np.float64)
+        self.surface_normals = np.vstack(normals).astype(np.float64)
+        
         self.n_surface_points = len(self.surface_points)
         print(f"NTFF: Created surface with {self.n_surface_points} points on 6 faces")
 
     def precompute_coefficients(self, far_field_directions, dt):
-        """Precompute geometric and temporal weights for the NTFF.
-
-        Parameters
-        ----------
-        far_field_directions : array_like, shape (n_dirs, 3)
-            Unit vectors \hat{r} giving the far-field directions.
-        dt : float
-            Time step, used to convert retardation times into
-            discrete indices and interpolation weights.
+        """
+        Store simulation parameters. 
+        Note: Unlike the previous version, this DOES NOT precompute the large matrices.
         """
         self.dt = dt
         self.directions = np.asarray(far_field_directions, dtype=np.float64)
-        self.n_dirs = self.directions.shape[0]
-
-        pts = self.surface_points  # (n_pts, 3)
-        norms = self.surface_normals  # (n_pts, 3)
-
-        # r_hat · r'  →  (n_dirs, 3) @ (3, n_pts) = (n_dirs, n_pts)
-        self.retardation_times = (self.directions @ pts.T) / self.c0
-
-        # n_hat · r_hat  →  (n_dirs, 3) @ (3, n_pts) = (n_dirs, n_pts)
-        self.geometric_weights = self.directions @ norms.T
-
-        # Convert retardation times to time indices and interpolation weights
-        self.time_indices = self.retardation_times / dt
-        self.time_idx_floor = np.floor(self.time_indices).astype(np.int64)
-        self.time_weight = self.time_indices - self.time_idx_floor
-
-        max_offset = np.max(np.abs(self.time_idx_floor))
-        print(f"NTFF: Coefficients computed for {self.n_dirs} directions")
-        print(f"      Max time offset: {max_offset} steps ({max_offset * dt * 1e6:.2f} μs)")
+        print(f"NTFF: Configured for {len(self.directions)} directions (On-the-fly mode).")
 
     def initialize_buffer(self, n_time_steps):
         """Allocate and zero the far-field accumulation buffer."""
-        self.far_field_buffer = np.zeros((self.n_dirs, n_time_steps), dtype=np.float64)
+        if self.directions is None:
+            raise ValueError("NTFF directions not set. Call precompute_coefficients first.")
+            
         self.n_time_steps = n_time_steps
-        print(f"NTFF: Buffer initialized ({self.n_dirs} × {n_time_steps})")
+        self.far_field_buffer = np.zeros((len(self.directions), n_time_steps), dtype=np.float64)
+        print(f"NTFF: Buffer initialized ({len(self.directions)} × {n_time_steps})")
 
     def accumulate(self, p_s, ux_s, uy_s, uz_s, time_step):
-        """Accumulate contributions from the current near-field state.
+        """Accumulate contributions from the current near-field state."""
+        # Gather surface data using advanced indexing
+        # This extracts the values at the surface indices into 1D arrays
+        idx = self.surface_indices
+        p_surf = p_s[idx[:,0], idx[:,1], idx[:,2]]
+        ux_surf = ux_s[idx[:,0], idx[:,1], idx[:,2]]
+        uy_surf = uy_s[idx[:,0], idx[:,1], idx[:,2]]
+        uz_surf = uz_s[idx[:,0], idx[:,1], idx[:,2]]
 
-        Parameters
-        ----------
-        p_s : ndarray, shape (N, N, N)
-            Total scattered pressure on the grid.
-        ux_s, uy_s, uz_s : ndarray, shape (N, N, N)
-            Scattered velocity components on the grid.
-        time_step : int
-            Current time-step index.
-        """
-        idx_i = self.surface_indices[:, 0]
-        idx_j = self.surface_indices[:, 1]
-        idx_k = self.surface_indices[:, 2]
-
-        # Gather pressure at surface points
-        p_surf = p_s[idx_i, idx_j, idx_k]
-
-        # Gather velocity at surface points into a (n_pts, 3) array
-        u_surf = np.empty((self.n_surface_points, 3), dtype=p_s.dtype)
-        u_surf[:, 0] = ux_s[idx_i, idx_j, idx_k]
-        u_surf[:, 1] = uy_s[idx_i, idx_j, idx_k]
-        u_surf[:, 2] = uz_s[idx_i, idx_j, idx_k]
-
-        accumulate_core(
+        # Call the JIT-compiled kernel
+        accumulate_core_on_the_fly(
             p_surf,
-            u_surf,
+            ux_surf, uy_surf, uz_surf,
+            self.surface_points,
             self.surface_normals,
-            self.time_idx_floor,
-            self.time_weight,
-            self.geometric_weights,
+            self.directions,
             self.far_field_buffer,
             self.dx,
             self.c0,
             self.rho0,
             self.n_time_steps,
             time_step,
+            self.dt
         )
 
     def compute_far_field(self):
-        """Apply the time derivative to the accumulated buffer (Eq. 17).
-
-        Returns
-        -------
-        p_ff : ndarray, shape (n_dirs, n_time_steps)
-            Far-field pressure as a function of angle and time.
-        """
+        """Apply the time derivative to the accumulated buffer (Eq. 17)."""
         p_ff = np.zeros_like(self.far_field_buffer)
 
         # Central differences for interior time indices
-        for i in range(1, self.n_time_steps - 1):
-            p_ff[:, i] = (
-                self.far_field_buffer[:, i + 1] - self.far_field_buffer[:, i - 1]
-            ) / (2.0 * self.dt)
+        p_ff[:, 1:-1] = (
+            self.far_field_buffer[:, 2:] - self.far_field_buffer[:, :-2]
+        ) / (2.0 * self.dt)
 
         # One-sided differences at boundaries
         p_ff[:, 0] = (
