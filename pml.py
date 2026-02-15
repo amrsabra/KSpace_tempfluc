@@ -19,18 +19,18 @@ class PML:
 
         
     def _init_absorption_profiles(self):
-        self.alpha_x = np.zeros(self.N)
+        self.alpha_x = np.zeros(self.N) # Initialise array of zeros.
         self.alpha_y = np.zeros(self.N)
         self.alpha_z = np.zeros(self.N)
         
-        # For each dimension, create absorption profiles
+        # For each dimension, create absorption profiles with 1D arrays.
         for dim, alpha_array in [('x', self.alpha_x), 
                                   ('y', self.alpha_y), 
                                   ('z', self.alpha_z)]:
             
             # Left boundary
             for i in range(self.depth):
-                # Distance from outer edge (normalized)
+                # Distance from outer edge.
                 x_rel = (self.depth - 1 - i) / self.depth
                 
                 # EQN 14: quartic taper
@@ -39,7 +39,7 @@ class PML:
             
             # Right boundary  
             for i in range(self.depth):
-                # Distance from outer edge (normalized)
+                # Distance from outer edge.
                 x_rel = i / self.depth
                 
                 # EQN 14: quartic taper
@@ -55,7 +55,11 @@ class PML:
         self.exp_alpha_x_dt_half = None
         self.exp_alpha_y_dt_half = None
         self.exp_alpha_z_dt_half = None
-        
+
+    '''  
+    # Update equations have deltat, so we are setting up the component.
+    # since deltat doesnt change, we precalculate it to save time. 
+    '''
     def set_dt(self, dt):
         self.dt = dt
 
@@ -68,6 +72,10 @@ class PML:
         self.exp_neg_alpha_z_dt_half = 1.0 / self.exp_alpha_z_dt_half
 
         
+    '''
+    update_velocity and update_pressure implement time-stepping for a damped wave equation.
+    the exp ensures update stays stable with high absorption, as seen in EQN 13
+    '''
     def update_velocity_component(self, u_prev, rhs, dt, direction):
         if self.exp_alpha_x_dt_half is None:
             self.set_dt(dt)

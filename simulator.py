@@ -17,50 +17,51 @@ class KSpaceAcousticScattering:
         self.dt = dt
         self.domain_size = self.N * self.dx
 
-        # Create spatial grid
+        # Create spatial grid centered at 0
         self.x = (np.arange(N) - N // 2) * dx
         self.y = (np.arange(N) - N // 2) * dx
         self.z = (np.arange(N) - N // 2) * dx
 
-        # 3D grids
+        # 3D grids and radial distance from center
         self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing="ij")
         self.R = np.sqrt(self.X**2 + self.Y**2 + self.Z**2)
 
-        self.kspace_ops = KSpaceOperators(N, dx, dt) 
-        self.pml = PML(N, dx)
-        self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx)
-        self.incident = IncidentWave(self.X, self.Y, self.Z)
+        self.kspace_ops = KSpaceOperators(N, dx, dt) # Initialise derivatives
+        self.pml = PML(N, dx) # Initialise PML boundary and components
+        self.atmosphere = AtmosphereGenerator(self.X, self.Y, self.Z, self.R, self.dx) # Initialise module responsible for generating the temp field.
+        self.incident = IncidentWave(self.X, self.Y, self.Z) # Initialise model that defines the analytical incident plane wave.
         self.ntff = NTFFTransform(self.x, self.y, self.z, dx,
-                                  constants.C0, constants.RHO0, constants.PML_DEPTH)
+                                  constants.C0, constants.RHO0, constants.PML_DEPTH) # Initialise NTFF module.
 
         # Precompute far-field directions
-        self.angles_deg = np.linspace(-180.0, 180.0, 360, endpoint=False)
-        directions = np.zeros((len(self.angles_deg), 3))
+        self.angles_deg = np.linspace(-180.0, 180.0, 360, endpoint=False) # Defines 360 observation angles for far field scattering 
+        directions = np.zeros((len(self.angles_deg), 3)) #3D vector array for each observer.
         for i, angle_deg in enumerate(self.angles_deg):
             angle_rad = np.deg2rad(angle_deg)
             directions[i] = [np.sin(angle_rad), 0.0, np.cos(angle_rad)]
 
-        self.ntff.precompute_coefficients(directions, self.dt)
+        self.ntff.precompute_coefficients(directions, self.dt) # Passes the directions and time step to the NTFF module for preparation.
         
-    def create_bragg_atmosphere(self, fm, DT=1.0, r0=constants.R0):
+    def create_bragg_atmosphere(self, fm, DT=1.0, r0=constants.R0): 
         return self.atmosphere.create_bragg_atmosphere(fm, DT, r0)
     
     def create_kolmogorov_atmosphere(self, CT2, r0=constants.R0, seed=None):
         return self.atmosphere.create_kolmogorov_atmosphere(CT2, r0, seed)
 
+    # This is what runs the actual time-stepping loop to find scattering data.
     def _simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
         self.fm = fm
         self.tau = tau
         self.delay = delay
 
         # Smoothing to prevent PSTD instability at sharp edges
-        T = gaussian_filter(T, sigma=1.0)
+        T = gaussian_filter(T, sigma=1.0) # From SciPy
 
         # NTFF setup
-        self.ntff.initialize_buffer(n_steps)
-        self.pml.set_dt(self.dt)
+        self.ntff.initialize_buffer(n_steps) # Allocates memory 360degrees x n_steps, to store results over the during of the sim.
+        self.pml.set_dt(self.dt) # Sets deltat for PML damping.
 
-        # Fields
+        # Fields (Basically 256 256x256 arrays filled with zeros for each component, to store pressure and velocity values)
         px_s = np.zeros((self.N, self.N, self.N))
         py_s = np.zeros((self.N, self.N, self.N))
         pz_s = np.zeros((self.N, self.N, self.N))
@@ -72,7 +73,7 @@ class KSpaceAcousticScattering:
         # Medium properties
         rho = constants.RHO0 * constants.T0 / T 
         
-        # Precompute Stability Factors
+        # Precompute rho Factors (1/rho0 - 1/rho) for EQN 9
         rho_const_inv = 1.0 / constants.RHO0
         rho_inv = 1.0 / rho
         corr_grad_factor = rho_const_inv - rho_inv
@@ -80,15 +81,16 @@ class KSpaceAcousticScattering:
         print(f"Simulating {n_steps} time steps")
         start_time = time.time()
 
-        _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay)
+        _, u_i_z_prev = self.incident.plane_wave(-self.dt, fm, tau, delay) # Calc incident wave before t=0
         z_center_idx = self.N // 2 
-        incident_power_density_sum = 0.0
+        incident_power_density_sum = 0.0 # Initializing a variable to track the total power of the incident pulse.
 
-        # Temporary buffers for summed fields
-        p_s_total = np.zeros_like(px_s)
+        # Temporary buffers for summed pressure fields, this space is reused.
+        # py_s and pz_s have the same shape, an array created based on px_s is perfectly sized to hold the sum of all three.
+        p_s_total = np.zeros_like(px_s) 
         
-        for step in range(n_steps):
-            t = step * self.dt 
+        for step in range(n_steps): # Time-Stepping loop
+            t = step * self.dt # Physical time
 
             # 1) Incident Wave Source
             p_i, u_i_z = self.incident.plane_wave(t, fm, tau, delay)
@@ -97,27 +99,28 @@ class KSpaceAcousticScattering:
             duiz_dt = (u_i_z - u_i_z_prev) / self.dt
             u_i_z_prev = u_i_z
 
-            source_term = (constants.RHO0 - rho) * duiz_dt
+            source_term = (constants.RHO0 - rho) * duiz_dt # EQN 9
             
             # Sum pressure components for gradient calc
             p_s_total[:] = px_s + py_s + pz_s
                 
             # 2) Calculate Gradients
             dpdx, dpdy, dpdz = self.kspace_ops.derivatives_xyz(p_s_total)
-
-            rhs_ux = -dpdx * rho_const_inv + (corr_grad_factor * dpdx)
+            
+            # COME BACK TO THIS 
+            rhs_ux = -dpdx * rho_const_inv + (corr_grad_factor * dpdx) 
             rhs_uy = -dpdy * rho_const_inv + (corr_grad_factor * dpdy)
-            rhs_uz = -dpdz * rho_const_inv + (corr_grad_factor * dpdz) + (source_term / rho)
+            rhs_uz = -dpdz * rho_const_inv + (corr_grad_factor * dpdz) + (source_term / rho) # Source term added only to z component, because incident wave moves +z
 
-            # 3) Update Velocities 
+            # 3) Update Velocities EQN 13
             self.pml.update_velocity_component(ux_s, rhs_ux, self.dt, 'x')
             self.pml.update_velocity_component(uy_s, rhs_uy, self.dt, 'y')
             self.pml.update_velocity_component(uz_s, rhs_uz, self.dt, 'z')
         
             # 4) Update Pressure
-            duxdx = self.kspace_ops.derivative(ux_s, 'x')
-            rhs_px = -constants.RHO0 * constants.C0**2 * duxdx
-            self.pml.update_pressure_component(px_s, rhs_px, self.dt, 'x') 
+            duxdx = self.kspace_ops.derivative(ux_s, 'x') # finds spatial deriv of x-velocity
+            rhs_px = -constants.RHO0 * constants.C0**2 * duxdx # Finds RHS for pressure update based on EQN 10
+            self.pml.update_pressure_component(px_s, rhs_px, self.dt, 'x') # updates scattered pressure using PML
             
             duydy = self.kspace_ops.derivative(uy_s, 'y')
             rhs_py = -constants.RHO0 * constants.C0**2 * duydy
@@ -131,16 +134,15 @@ class KSpaceAcousticScattering:
             p_s_total[:] = px_s + py_s + pz_s
             self.ntff.accumulate(p_s_total, ux_s, uy_s, uz_s, step)
 
-            if (step + 1) % 100 == 0:
+            if (step + 1) % 100 == 0: #print steps to track progress of simulation
                 print(f"  Step {step + 1}/{n_steps}")
         
         elapsed = time.time() - start_time
         print(f"Simulation completed in {elapsed:.1f} seconds")
         
-        p_ff = self.ntff.compute_far_field() 
-        far_field = np.sum(p_ff**2, axis=1)
+        p_ff = self.ntff.compute_far_field() # Get final far-field pressure series.
+        far_field = np.sum(p_ff**2, axis=1) # Calculates total scattered energy at each angle
 
-        # FIX: use self.angles_deg instead of the undefined local variable
         return far_field, self.angles_deg, incident_power_density_sum
 
     def simulate_scattering(self, T, n_steps=7000, fm=constants.DEFAULT_FM, tau=constants.DEFAULT_TAU, delay=constants.DEFAULT_DELAY):
