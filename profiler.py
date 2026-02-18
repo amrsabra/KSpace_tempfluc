@@ -4,6 +4,7 @@ import time
 import numpy as np
 import constants
 from simulator import KSpaceAcousticScattering
+import cProfile  # Required for snakeviz compatibility
 
 def run_profiled_kolmogorov():
     # 1. Setup simulation parameters (matching full grid size and constants)
@@ -26,18 +27,16 @@ def run_profiled_kolmogorov():
         seed=42  # Static seed for profiling consistency
     )
 
-    # 3. Setup the simulation (Internal setup usually done in simulate_scattering)
-    # We will manually step through the simulation to get the timing intervals
+    # 3. Setup the simulation
     print(f"Starting profiling for {total_steps} steps...\n")
     
-    # Initialization of fields and buffers inside the simulator logic
     sim.fm = constants.DEFAULT_FM
     sim.tau = constants.DEFAULT_TAU
     sim.delay = constants.DEFAULT_DELAY
     sim.ntff.initialize_buffer(total_steps)
     sim.pml.set_dt(sim.dt)
 
-    # Initialize simulation fields (simplified mirror of simulator._simulate_scattering)
+    # Initialize simulation fields
     px_s = np.zeros((N, N, N))
     py_s = np.zeros((N, N, N))
     pz_s = np.zeros((N, N, N))
@@ -57,7 +56,7 @@ def run_profiled_kolmogorov():
     interval_start = time.time()
 
     for step in range(1, total_steps + 1):
-        # --- CORE SIMULATION STEP (from simulator.py) ---
+        # --- CORE SIMULATION STEP ---
         t = (step - 1) * sim.dt 
         p_i, u_i_z = sim.incident.plane_wave(t, sim.fm, sim.tau, sim.delay)
         duiz_dt = (u_i_z - u_i_z_prev) / sim.dt
@@ -86,7 +85,6 @@ def run_profiled_kolmogorov():
         sim.ntff.accumulate(p_s_total, ux_s, uy_s, uz_s, step - 1)
         # --- END CORE STEP ---
 
-        # Logging every 10 steps
         if step % interval == 0:
             interval_end = time.time()
             duration = interval_end - interval_start
@@ -94,11 +92,22 @@ def run_profiled_kolmogorov():
             print(f"Steps {step-9} to {step} done.")
             print(f"  -> Total time for these 10 steps: {duration:.4f} seconds")
             print(f"  -> Average time per step: {avg_time_per_step:.4f} seconds")
-            interval_start = time.time() # Reset interval timer
+            interval_start = time.time() 
 
     overall_end = time.time()
     print(f"\nProfiling complete.")
     print(f"Total time for 100 steps: {overall_end - overall_start:.2f} seconds.")
 
 if __name__ == "__main__":
+    # Create the profiler object
+    profiler = cProfile.Profile()
+    
+    # Run the simulation through the profiler
+    profiler.enable()
     run_profiled_kolmogorov()
+    profiler.disable()
+    
+    # Save the output to the .prof file for Snakeviz
+    output_file = "afterFFTW.prof"
+    profiler.dump_stats(output_file)
+    print(f"\n[DONE] Profile data saved to {output_file}")

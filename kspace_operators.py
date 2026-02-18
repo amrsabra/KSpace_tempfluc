@@ -1,8 +1,12 @@
 # kspace_operators.py
 
 import numpy as np
-from scipy.fft import fftn, ifftn, fftfreq
+import pyfftw
+import multiprocessing
+from scipy.fft import fftfreq
 import constants
+
+pyfftw.interfaces.cache.enable()
 
 class KSpaceOperators:
     def __init__(self, N, dx, dt, c0=constants.C0):
@@ -10,6 +14,9 @@ class KSpaceOperators:
         self.dx = dx
         self.dt = dt
         self.c0 = c0
+
+        # Define self.threads before creating FFTW plans.
+        self.threads = multiprocessing.cpu_count()
 
         '''
         # Changing to frequency domain using wavenumbers(k) in 1D.
@@ -28,22 +35,43 @@ class KSpaceOperators:
         # EQN 11: Sinc correction for numerical dispersion
         # sinc(x) in numpy is sin(pi*x)/(pi*x), so we scale argument by 1/pi to match EQN 11
         self.sinc_term = np.sinc(self.c0 * self.dt * k_mag / (2.0 * np.pi)) 
+
+        # FFTW array preparation
+        self.in_array = pyfftw.empty_aligned((N, N, N), dtype='complex128')
+        self.k_array = pyfftw.empty_aligned((N, N, N), dtype='complex128')
+        self.out_array = pyfftw.empty_aligned((N, N, N), dtype='complex128')
+
+        # Create the Forward Plan (FFTN)
+        self.forward_fft = pyfftw.FFTW(
+            self.in_array, self.k_array, 
+            axes=(0, 1, 2), direction='FFTW_FORWARD', 
+            flags=('FFTW_MEASURE',), threads=self.threads
+        )
+
+        # 3. Create the Backward Plan (IFFTN)
+        self.backward_fft = pyfftw.FFTW(
+            self.k_array, self.out_array, 
+            axes=(0, 1, 2), direction='FFTW_BACKWARD', 
+            flags=('FFTW_MEASURE',), threads=self.threads
+        )
         
     def derivative(self, field, axis):
-        field_k = fftn(field, workers=-1) #Transforms spatial field to frequency domain.
+        #Transforms spatial field to frequency domain.
+        self.in_array[:] = field
+        self.forward_fft() 
 
         # Applying EQN 11. But does only 1 direction to avoid doing others if not needed and reduce computation time.
         if axis == 'x':
-            deriv_k = 1j * self.KX * self.sinc_term * field_k
+            self.k_array[:] *= (1j * self.KX * self.sinc_term)
         elif axis == 'y':
-            deriv_k = 1j * self.KY * self.sinc_term * field_k
+            self.k_array[:] *= (1j * self.KY * self.sinc_term)
         elif axis == 'z':
-            deriv_k = 1j * self.KZ * self.sinc_term * field_k
+            self.k_array[:] *= (1j * self.KZ * self.sinc_term)
         else:
             raise ValueError("axis must be 'x', 'y', or 'z'")
 
-        deriv = ifftn(deriv_k, workers=-1) # Back to spatial domain
-        return np.real(deriv) 
+        self.backward_fft()
+        return np.real(self.out_array)
 
     '''
     # For dp/dx, dp/dy, and dp/dz, 
@@ -51,13 +79,24 @@ class KSpaceOperators:
     # instead of 3 forward and 3 backward for faster computation.
     '''    
     def derivatives_xyz(self, field): 
-        field_k = fftn(field, workers=-1)
+        self.in_array[:] = field
+        self.forward_fft()
 
-        deriv_x_k = 1j * self.KX * self.sinc_term * field_k
-        deriv_y_k = 1j * self.KY * self.sinc_term * field_k
-        deriv_z_k = 1j * self.KZ * self.sinc_term * field_k
+        field_k = self.k_array.copy()
 
-        dx = np.real(ifftn(deriv_x_k, workers=-1))
-        dy = np.real(ifftn(deriv_y_k, workers=-1))
-        dz = np.real(ifftn(deriv_z_k, workers=-1))
+        # 2. X-Derivative calculation
+        self.k_array[:] = field_k * (1j * self.KX * self.sinc_term)
+        self.backward_fft()
+        dx = np.real(self.out_array).copy()
+
+        # 3. Y-Derivative calculation
+        self.k_array[:] = field_k * (1j * self.KY * self.sinc_term)
+        self.backward_fft()
+        dy = np.real(self.out_array).copy()
+
+        # 4. Z-Derivative calculation
+        self.k_array[:] = field_k * (1j * self.KZ * self.sinc_term)
+        self.backward_fft()
+        dz = np.real(self.out_array).copy()
+
         return dx, dy, dz
