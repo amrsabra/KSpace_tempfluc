@@ -19,10 +19,6 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
     sensor_fwd_list = []
     sensor_bwd_list = []
 
-    # Define the physical pulse window to exclude transients and ringing
-    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
-    end_step = start_step + 2000 
-
     for r0 in r0_values:
         print(f"\n=== Bragg atmosphere: r0 = {r0:.3f} m ===")
 
@@ -35,7 +31,7 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
         bragg_V_scat_list.append(V_scat)
 
         # Capture the three return values (far_field_energy, angles_deg, incident_power_density_sum)
-        _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+        far_field_energy, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
             T,
             n_steps=n_steps,
             fm=fm,
@@ -46,10 +42,7 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
         # Recover full far-field time series p_ff from NTFF buffer
         p_ff = sim.ntff.compute_far_field()
 
-        # Recalculate energy using the targeted pulse window
-        energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
-
-        bragg_far_field_energy_list.append(energy)
+        bragg_far_field_energy_list.append(far_field_energy)
         bragg_p_ff_list.append(p_ff)
         incident_power_density_list.append(incident_power_density_sum)
         sensor_fwd_list.append(sensor_fwd)
@@ -85,10 +78,6 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
     kolm_sensor_fwd = None
     kolm_sensor_bwd = None
 
-    # Targeted pulse window indices
-    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
-    end_step = start_step + 2000 
-
     for i, seed in enumerate(seeds):
         print(f"\n=== Kolmogorov atmosphere: seed = {seed} ===")
 
@@ -102,8 +91,8 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
             kolm_T_example = T - constants.T0
 
         for j, fm in enumerate(fm_list): # loop to show how different sound frequencies interact with same atmosphere (1000Hz and 1200Hz)
-            print(f"   -> fm = {fm:.1f} Hz")
-            _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+            print(f"  -> fm = {fm:.1f} Hz")
+            far_field_energy, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
                 kolm_data_tuple,
                 n_steps=n_steps,
                 fm=fm,
@@ -112,9 +101,6 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
             )
 
             p_ff = sim.ntff.compute_far_field()
-
-            # Windowed energy to remove transients and ringing
-            energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
 
             if first_run: #initialise needed variables only the first time, and reuse the second time
                 n_dirs, n_time = p_ff.shape
@@ -133,7 +119,7 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
             :, : tells NumPy to take the 2D result of p_ff (360 directions by 7000 steps) and store it with specific i and j coordinates
             '''
             kolm_p_ff[i, j, :, :] = p_ff 
-            kolm_far_field_energy[i, j, :] = energy
+            kolm_far_field_energy[i, j, :] = far_field_energy
             kolm_sensor_fwd[i, j, :] = sensor_fwd
             kolm_sensor_bwd[i, j, :] = sensor_bwd
             
@@ -193,10 +179,6 @@ def main():
         "t": t,
     }
 
-    # Targeted pulse window indices for single modes
-    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
-    end_step = start_step + 2000
-
     # Bragg: full sweep or combined run (old)
     if args.mode in ("all", "bragg"):
         bragg_data = run_bragg_sweep(
@@ -234,7 +216,7 @@ def main():
             r0=float(args.r0),
         )
 
-        _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+        far_field_energy, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
             T, # Pass T directly for Bragg
             n_steps=args.n_steps,
             fm=float(constants.DEFAULT_FM),
@@ -243,15 +225,12 @@ def main():
         )
 
         p_ff = sim.ntff.compute_far_field()
-        
-        # Windowed energy to remove transients and ringing
-        energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
 
         out.update({
             "mode": "bragg_single",
             "r0": float(args.r0),
             "V_scat": float(V_scat),
-            "far_field_energy": energy,
+            "far_field_energy": far_field_energy,
             "p_ff": p_ff,
             "angles_deg": np.array(angles_deg, dtype=float),
             # FIX: Include incident power density
@@ -279,8 +258,8 @@ def main():
         sensor_bwd_list = []
 
         for fm in fm_list:
-            print(f"   -> fm = {fm:.1f} Hz")
-            _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+            print(f"  -> fm = {fm:.1f} Hz")
+            far_field_energy, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
                 kolm_data_tuple,
                 n_steps=args.n_steps,
                 fm=fm,
@@ -289,11 +268,8 @@ def main():
             )
             p_ff = sim.ntff.compute_far_field()
 
-            # Windowed energy to remove transients and ringing
-            energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
-
             kolm_p_ff_list.append(p_ff)
-            kolm_energy_list.append(energy)
+            kolm_energy_list.append(far_field_energy)
             kolm_incident_power_list.append(incident_power_density_sum)
             sensor_fwd_list.append(sensor_fwd)
             sensor_bwd_list.append(sensor_bwd)
