@@ -102,4 +102,4 @@ class AtmosphereGenerator:
         # Calculate scattering volume
         V_scat = np.sum(window) * self.dx**3
         
-        return T, window, V_scat
+        return T, window, V_scat, T_k, window

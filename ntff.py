@@ -14,6 +14,7 @@ def accumulate_core_on_the_fly(
     dx,
     c0,
     rho0,
+    vx, vy, vz,
     n_time_steps,
     time_step,
     dt
@@ -35,6 +36,8 @@ def accumulate_core_on_the_fly(
         rx = directions[i_dir, 0]
         ry = directions[i_dir, 1]
         rz = directions[i_dir, 2]
+
+        c_eff = c0 + (vx * rx + vy * ry + vz * rz)
         
         for i_pt in range(n_surface_points):# i_pt is index of surface point 
             # 1. Geometry Calculation (Replaces Lookup Table)
@@ -61,7 +64,7 @@ def accumulate_core_on_the_fly(
             # retardation (time) = (r_hat . r') / c0
             # t_ret = t - (r_hat . r')/c0
             # We map this to indices.
-            retardation_val = r_dot_p / c0
+            retardation_val = r_dot_p / c_eff
             retardation_idx = retardation_val / dt # count of timesteps
             
             # Floor and Weight
@@ -79,7 +82,7 @@ def accumulate_core_on_the_fly(
             # 3. Physics Accumulation
             # Pressure term: (n . r) * p / c0
             p_val = p_surf[i_pt]
-            term_p = n_dot_r * p_val / c0
+            term_p = n_dot_r * p_val / c_eff
             
             # Velocity term: rho0 * (n . u)
             u_dot_n = ux_surf[i_pt]*nx + uy_surf[i_pt]*ny + uz_surf[i_pt]*nz
@@ -98,11 +101,15 @@ def accumulate_core_on_the_fly(
 
 
 class NTFFTransform:
-    def __init__(self, grid_x, grid_y, grid_z, dx, c0, rho0, pml_depth=constants.PML_DEPTH):
+    def __init__(self, grid_x, grid_y, grid_z, dx, c0, rho0, pml_depth=constants.PML_DEPTH, vx=0.0, vy=0.0, vz=0.0):
         self.dx = dx
         self.c0 = c0
         self.rho0 = rho0
         self.pml_depth = pml_depth
+
+        self.vx = vx
+        self.vy = vy
+        self.vz = vz
         
         # Setup Surface Geometry
         self.surface_idx = pml_depth
@@ -193,7 +200,7 @@ class NTFFTransform:
         uy_surf = uy_s[idx[:,0], idx[:,1], idx[:,2]]
         uz_surf = uz_s[idx[:,0], idx[:,1], idx[:,2]]
 
-        # Call the JIT-compiled kernel
+        # Call the JIT-compiled operator
         accumulate_core_on_the_fly(
             p_surf,
             ux_surf, uy_surf, uz_surf,
@@ -204,6 +211,7 @@ class NTFFTransform:
             self.dx,
             self.c0,
             self.rho0,
+            self.vx, self.vy, self.vz,
             self.n_time_steps,
             time_step,
             self.dt

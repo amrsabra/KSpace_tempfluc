@@ -5,26 +5,29 @@ import numpy as np
 import constants
 
 class IncidentWave:
-    def __init__(self, X, Y, Z):
+    def __init__(self, X, Y, Z, wind_vz=0.0):
         # We only need variation along z, it will look like [-2.56, -2.54, ..., 2.54], centered around 0.
         z_axis = Z[0, 0, :]
 
         # pre-compute below to save computation time
         self.z_axis = z_axis
-        self.z_over_c0 = z_axis / constants.C0
-        self.div_rho0_c0 = 1.0 / (constants.RHO0 * constants.C0)
+        # Sound travels at C0 + the component of wind in the Z direction
+        self.c_eff = constants.C0 + wind_vz
+        self.z_over_ceff = z_axis / self.c_eff
+        self.div_rho0_ceff = 1.0 / (constants.RHO0 * self.c_eff)
 
     def plane_wave(self, t, fm=constants.DEFAULT_FM, sigma=constants.DEFAULT_TAU, mu=constants.DEFAULT_DELAY):
-        tau_1d = t - self.z_over_c0 # inside f(tau) in EQN 1, f(tau) found in pg. 88, hargreaves.
+        tau_1d = t - self.z_over_ceff # inside f(tau) in EQN 1, f(tau) found in pg. 88, hargreaves.
 
         exponential_1d = np.exp(-((tau_1d - mu) / (2 * sigma))**2) # component of f(tau)
         carrier_1d = np.cos(2 * np.pi * fm * (tau_1d - mu)) # component of f(tau)
 
         p_i_1d = exponential_1d * carrier_1d # outcome of f(tau), with EQN 1 variables.
-        u_i_z_1d = p_i_1d * self.div_rho0_c0 # EQN 2.
+        u_i_z_1d = p_i_1d * self.div_rho0_ceff # EQN 2.
 
         # shape (1, 1, N) then broadcast when used. None is used instead of 0 as we cant have a dimension of 0 and 0 could break any later multiplications.
         p_i = p_i_1d[None, None, :]
         u_i_z = u_i_z_1d[None, None, :]
 
         return p_i, u_i_z
+    

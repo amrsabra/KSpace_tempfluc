@@ -18889,7 +18889,7 @@ PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 PyObject *__pyx_args, PyObject *__pyx_kwds
 #endif
 ); /*proto*/
-PyDoc_STRVAR(__pyx_doc_12pml_python_c_update_pml_c, "\n    Compiled C-kernel for Equation 13.\n    Updates the 3D grid in-place using 1D absorption profiles.\n    ");
+PyDoc_STRVAR(__pyx_doc_12pml_python_c_update_pml_c, "\n    Compiled C-operator for Equation 13.\n    Updates the 3D grid in-place using 1D absorption profiles.\n    ");
 static PyMethodDef __pyx_mdef_12pml_python_c_1update_pml_c = {"update_pml_c", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_12pml_python_c_1update_pml_c, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_12pml_python_c_update_pml_c};
 static PyObject *__pyx_pw_12pml_python_c_1update_pml_c(PyObject *__pyx_self, 
 #if CYTHON_METH_FASTCALL

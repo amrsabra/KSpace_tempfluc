@@ -14,7 +14,7 @@ def update_pml_c(double[:, :, :] arr,
                     double dt, 
                     str direction):
     """
-    Compiled C-kernel for Equation 13.
+    Compiled C-operator for Equation 13.
     Updates the 3D grid in-place using 1D absorption profiles.
     """
     cdef int Ni = arr.shape[0]

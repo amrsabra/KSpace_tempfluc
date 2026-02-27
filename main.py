@@ -16,6 +16,12 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
     bragg_V_scat_list = []
     angles_deg = None
     incident_power_density_list = [] 
+    sensor_fwd_list = []
+    sensor_bwd_list = []
+
+    # Define the physical pulse window to exclude transients and ringing
+    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
+    end_step = start_step + 2000 
 
     for r0 in r0_values:
         print(f"\n=== Bragg atmosphere: r0 = {r0:.3f} m ===")
@@ -29,7 +35,7 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
         bragg_V_scat_list.append(V_scat)
 
         # Capture the three return values (far_field_energy, angles_deg, incident_power_density_sum)
-        far_field_energy, angles_deg, incident_power_density_sum = sim.simulate_scattering(
+        _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
             T,
             n_steps=n_steps,
             fm=fm,
@@ -40,9 +46,14 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
         # Recover full far-field time series p_ff from NTFF buffer
         p_ff = sim.ntff.compute_far_field()
 
-        bragg_far_field_energy_list.append(far_field_energy)
+        # Recalculate energy using the targeted pulse window
+        energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
+
+        bragg_far_field_energy_list.append(energy)
         bragg_p_ff_list.append(p_ff)
         incident_power_density_list.append(incident_power_density_sum)
+        sensor_fwd_list.append(sensor_fwd)
+        sensor_bwd_list.append(sensor_bwd)
 
     bragg_far_field_energy = np.stack(bragg_far_field_energy_list, axis=0)
     bragg_p_ff = np.stack(bragg_p_ff_list, axis=0)
@@ -55,6 +66,8 @@ def run_bragg_sweep(sim, n_steps, fm, tau_short, r0_values):
         "bragg_p_ff": bragg_p_ff,
         "angles_deg": np.array(angles_deg, dtype=float),
         "bragg_incident_power_density": np.array(incident_power_density_list[0], dtype=float),
+        "bragg_sensor_fwd_raw": np.array(sensor_fwd_list),
+        "bragg_sensor_bwd_raw": np.array(sensor_bwd_list),
     }
 
 
@@ -69,15 +82,19 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
     kolm_V_scat = None
     kolm_T_example = None
     kolm_incident_power_density = None 
+    kolm_sensor_fwd = None
+    kolm_sensor_bwd = None
+
+    # Targeted pulse window indices
+    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
+    end_step = start_step + 2000 
 
     for i, seed in enumerate(seeds):
         print(f"\n=== Kolmogorov atmosphere: seed = {seed} ===")
 
-        T, window, V_scat = sim.create_kolmogorov_atmosphere(
-            CT2=CT2,
-            r0=constants.R0,
-            seed=int(seed),
-        )
+        kolm_data_tuple = sim.create_kolmogorov_atmosphere(CT2=CT2, r0=constants.R0, seed=seed)
+        T, window, V_scat, _, _ = kolm_data_tuple
+
         if kolm_V_scat is None: # volume scattering
             kolm_V_scat = V_scat
 
@@ -85,9 +102,9 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
             kolm_T_example = T - constants.T0
 
         for j, fm in enumerate(fm_list): # loop to show how different sound frequencies interact with same atmosphere (1000Hz and 1200Hz)
-            print(f"  -> fm = {fm:.1f} Hz")
-            far_field_energy, angles_deg, incident_power_density_sum = sim.simulate_scattering(
-                T,
+            print(f"   -> fm = {fm:.1f} Hz")
+            _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+                kolm_data_tuple,
                 n_steps=n_steps,
                 fm=fm,
                 tau=constants.DEFAULT_TAU,
@@ -96,12 +113,17 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
 
             p_ff = sim.ntff.compute_far_field()
 
+            # Windowed energy to remove transients and ringing
+            energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
+
             if first_run: #initialise needed variables only the first time, and reuse the second time
                 n_dirs, n_time = p_ff.shape
                 n_fm = len(fm_list)
                 kolm_p_ff = np.zeros((n_realizations, n_fm, n_dirs, n_time), dtype=np.complex128)
                 kolm_far_field_energy = np.zeros((n_realizations, n_fm, n_dirs), dtype=np.float64)
                 kolm_incident_power_density = np.zeros(n_fm, dtype=np.float64)
+                kolm_sensor_fwd = np.zeros((n_realizations, n_fm, n_steps), dtype=np.float64)
+                kolm_sensor_bwd = np.zeros((n_realizations, n_fm, n_steps), dtype=np.float64)
                 first_run = False
 
             '''
@@ -111,7 +133,9 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
             :, : tells NumPy to take the 2D result of p_ff (360 directions by 7000 steps) and store it with specific i and j coordinates
             '''
             kolm_p_ff[i, j, :, :] = p_ff 
-            kolm_far_field_energy[i, j, :] = far_field_energy
+            kolm_far_field_energy[i, j, :] = energy
+            kolm_sensor_fwd[i, j, :] = sensor_fwd
+            kolm_sensor_bwd[i, j, :] = sensor_bwd
             
             # Store incident power density (constant across realizations, but depends on fm)
             if i == 0:
@@ -128,8 +152,9 @@ def run_kolmogorov_ensemble(sim, n_steps, fm_list, n_realizations, CT2):
         "kolm_T_example": kolm_T_example,
         "angles_deg": np.array(angles_deg, dtype=float),
         "kolm_incident_power_density": kolm_incident_power_density,
+        "kolm_sensor_fwd_raw": kolm_sensor_fwd,
+        "kolm_sensor_bwd_raw": kolm_sensor_bwd,
     }
-
 
 def main():
     parser = argparse.ArgumentParser(description="Run k-space acoustic scattering sims and save results to NPZ.")
@@ -153,7 +178,7 @@ def main():
     t = np.arange(args.n_steps) * constants.DEFAULT_DT
     tau_short = 1e-3
     bragg_r0_values = [0.15, 0.3, 0.6, 1.2, 2.4]
-    CT2 = 1.5e-7 * constants.T0 ** 2 #From the paper right under EQN 22.
+    CT2 = 1.5e-6 * constants.T0 ** 2 #From the paper right under EQN 22.
     fm_list = [1000.0, 1200.0]
     n_realizations = 8
 
@@ -167,6 +192,10 @@ def main():
         "PML_DEPTH": int(constants.PML_DEPTH),
         "t": t,
     }
+
+    # Targeted pulse window indices for single modes
+    start_step = int(constants.DEFAULT_DELAY / constants.DEFAULT_DT)
+    end_step = start_step + 2000
 
     # Bragg: full sweep or combined run (old)
     if args.mode in ("all", "bragg"):
@@ -205,24 +234,30 @@ def main():
             r0=float(args.r0),
         )
 
-        far_field_energy, angles_deg, incident_power_density_sum = sim.simulate_scattering(
-            T,
+        _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+            T, # Pass T directly for Bragg
             n_steps=args.n_steps,
             fm=float(constants.DEFAULT_FM),
             tau=tau_short,
             delay=constants.DEFAULT_DELAY,
         )
+
         p_ff = sim.ntff.compute_far_field()
+        
+        # Windowed energy to remove transients and ringing
+        energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
 
         out.update({
             "mode": "bragg_single",
             "r0": float(args.r0),
             "V_scat": float(V_scat),
-            "far_field_energy": far_field_energy,
+            "far_field_energy": energy,
             "p_ff": p_ff,
             "angles_deg": np.array(angles_deg, dtype=float),
             # FIX: Include incident power density
             "incident_power_density": float(incident_power_density_sum),
+            "sensor_fwd_raw": sensor_fwd,
+            "sensor_bwd_raw": sensor_bwd,
         })
 
     # Kolmogorov: single realization (for job array) (new)
@@ -233,21 +268,20 @@ def main():
         seed = int(args.seed)
         print(f"\n=== Kolmogorov single run, seed = {seed} ===")
 
-        T, window, V_scat = sim.create_kolmogorov_atmosphere(
-            CT2=CT2,
-            r0=constants.R0,
-            seed=seed,
-        )
+        kolm_data_tuple = sim.create_kolmogorov_atmosphere(CT2=CT2, r0=constants.R0, seed=seed)
+        T, window, V_scat, _, _ = kolm_data_tuple
 
         kolm_p_ff_list = []
         kolm_energy_list = []
         angles_deg = None
         kolm_incident_power_list = [] # List to store incident power for each fm
+        sensor_fwd_list = []
+        sensor_bwd_list = []
 
         for fm in fm_list:
-            print(f"  -> fm = {fm:.1f} Hz")
-            far_field_energy, angles_deg, incident_power_density_sum = sim.simulate_scattering(
-                T,
+            print(f"   -> fm = {fm:.1f} Hz")
+            _, angles_deg, incident_power_density_sum, sensor_fwd, sensor_bwd = sim.simulate_scattering(
+                kolm_data_tuple,
                 n_steps=args.n_steps,
                 fm=fm,
                 tau=constants.DEFAULT_TAU,
@@ -255,14 +289,20 @@ def main():
             )
             p_ff = sim.ntff.compute_far_field()
 
+            # Windowed energy to remove transients and ringing
+            energy = np.sum(p_ff[:, start_step:min(end_step, p_ff.shape[1])]**2, axis=1)
+
             kolm_p_ff_list.append(p_ff)
-            kolm_energy_list.append(far_field_energy)
+            kolm_energy_list.append(energy)
             kolm_incident_power_list.append(incident_power_density_sum)
+            sensor_fwd_list.append(sensor_fwd)
+            sensor_bwd_list.append(sensor_bwd)
 
         out.update({
             "mode": "kolm_single",
             "seed": seed,
             "kolm_V_scat": float(V_scat),
+            "kolm_window": window,
             # shape: (2, n_dirs, n_time) for fm = [1000, 1200]
             "kolm_p_ff": np.array(kolm_p_ff_list),
             # shape: (2, n_dirs)
@@ -270,6 +310,8 @@ def main():
             "angles_deg": np.array(angles_deg, dtype=float),
             "kolm_incident_power_density": np.array(kolm_incident_power_list, dtype=float),
             "kolm_T_example": T - constants.T0,
+            "sensor_fwd_raw": np.array(sensor_fwd_list),
+            "sensor_bwd_raw": np.array(sensor_bwd_list),
         })
 
     print(f"\nSaving results to {args.output} ...")
